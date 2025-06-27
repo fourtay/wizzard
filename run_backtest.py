@@ -1,4 +1,4 @@
-# run_backtest.py (Final Version - Clean Workspace)
+# run_backtest.py (Definitive Final Version)
 import os
 import subprocess
 import sys
@@ -6,7 +6,7 @@ import sys
 # --- Settings ---
 QC_PROJECT_NAME = "23708106"
 WORKSPACE_DIR = "lean_workspace"
-# The output path is now inside the workspace directory
+# The output path must be inside the project folder that gets created
 OUTPUT_FILE_PATH = f"{WORKSPACE_DIR}/{QC_PROJECT_NAME}/backtest-results.json"
 
 # --- Get Credentials from GitHub Secrets ---
@@ -29,10 +29,12 @@ login_command = ["lean", "login", "--user-id", QC_USER_ID, "--api-token", QC_API
 subprocess.run(login_command, check=True, capture_output=True, text=True)
 print("Successfully logged in.")
 
-# --- 3. Initialize the LEAN Workspace ---
-# This will now run in an empty directory, preventing the prompt.
-print("Initializing LEAN workspace...")
-init_command = ["lean", "init"]
+# --- 3. Initialize the LEAN Workspace Non-Interactively ---
+# This is the definitive fix. We provide the answers to the prompts directly.
+# --language python : Answers "What should the default language be?"
+# --no-samples    : Prevents the large sample data download.
+print("Initializing LEAN workspace non-interactively...")
+init_command = ["lean", "init", "--language", "python", "--no-samples"]
 try:
     subprocess.run(init_command, check=True, capture_output=True, text=True)
     print("Successfully initialized workspace.")
@@ -41,6 +43,7 @@ except subprocess.CalledProcessError as e:
     print("Output:", e.stdout)
     print("Error Output:", e.stderr)
     sys.exit(1)
+
 
 # --- 4. Pull Cloud Project into the Workspace ---
 print(f"Pulling cloud project '{QC_PROJECT_NAME}'...")
