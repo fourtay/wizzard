@@ -1,8 +1,9 @@
-# store_results.py (Corrected Version 3 - Final)
+# store_results.py (Corrected Version 4 - Definitive Auth)
 import os
 import json
 import time
 import requests
+import hashlib
 from google.cloud import firestore
 
 # --- Settings ---
@@ -24,21 +25,19 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
 db = firestore.Client()
 print("Successfully connected to Google Firestore.")
 
-# --- Define Reusable Auth and Headers ---
-def get_authenticated_session():
-    session = requests.Session()
-    session.auth = requests.auth.HTTPBasicAuth(QC_USER_ID, QC_API_TOKEN)
-    return session
-
-def get_headers():
-    return {
+# --- Definitive Authentication Function ---
+def get_auth_and_headers():
+    timestamp = str(int(time.time()))
+    signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
+    headers = {
         "Accept": "application/json",
-        "Timestamp": str(int(time.time()))
+        "Timestamp": timestamp  # Timestamp must be in the headers
     }
+    # The auth tuple is the UserID and the generated HASH
+    auth = (QC_USER_ID, signature)
+    return auth, headers
 
 # --- Main Script ---
-session = get_authenticated_session()
-
 # 1. Read the Backtest ID
 try:
     with open("backtest_id.txt", "r") as f:
@@ -54,10 +53,12 @@ results_response = None
 while True:
     read_payload = { "backtestId": backtest_id }
     try:
-        response = session.post( # NOTE: The read endpoint is a POST
+        auth, headers = get_auth_and_headers()
+        response = requests.post(
             backtest_read_url,
             json=read_payload,
-            headers=get_headers()
+            headers=headers,
+            auth=auth
         )
         response.raise_for_status()
         read_json = response.json()
