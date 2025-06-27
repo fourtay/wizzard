@@ -1,8 +1,9 @@
-# run_backtest.py (Corrected Version 5 - Final)
+# run_backtest.py (Corrected Version 6 - Definitive Auth)
 import os
 import requests
 import time
 import json
+import hashlib
 
 # --- Settings ---
 QC_PROJECT_ID = 23708106 # Your real Project ID
@@ -16,37 +17,37 @@ except KeyError:
     print("ERROR: Make sure QC_USER_ID and QC_API_TOKEN are set.")
     exit(1)
 
-# --- Define Reusable Auth and Headers ---
-def get_authenticated_session():
-    session = requests.Session()
-    session.auth = requests.auth.HTTPBasicAuth(QC_USER_ID, QC_API_TOKEN)
-    return session
-
-def get_headers():
-    return {
+# --- Definitive Authentication Function ---
+def get_auth_and_headers():
+    timestamp = str(int(time.time()))
+    signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
+    headers = {
         "Accept": "application/json",
-        "Timestamp": str(int(time.time()))
+        "Timestamp": timestamp  # Timestamp must be in the headers
     }
+    # The auth tuple is the UserID and the generated HASH
+    auth = (QC_USER_ID, signature)
+    return auth, headers
 
 # --- Main Script ---
-session = get_authenticated_session()
-
 # 1. Create a Compile Job
 compile_create_url = f"{QC_API_URL}/compiles/create"
 compile_payload = { "projectId": QC_PROJECT_ID }
 print(f"Submitting compile request for project {QC_PROJECT_ID}...")
 
 try:
-    compile_response = session.post(
+    auth, headers = get_auth_and_headers()
+    compile_response = requests.post(
         compile_create_url,
         json=compile_payload,
-        headers=get_headers()
+        headers=headers,
+        auth=auth
     )
     compile_response.raise_for_status()
     compile_json = compile_response.json()
 except Exception as e:
     print(f"ERROR during compile creation: {e}")
-    if 'response' in locals():
+    if 'compile_response' in locals():
         print(f"Response text: {compile_response.text}")
     exit(1)
 
@@ -63,10 +64,12 @@ compile_read_url = f"{QC_API_URL}/compiles/read"
 while True:
     read_payload = { "compileId": compile_id }
     try:
-        status_response = session.get(
+        auth, headers = get_auth_and_headers()
+        status_response = requests.get(
             compile_read_url,
             params=read_payload,
-            headers=get_headers()
+            headers=headers,
+            auth=auth
         )
         status_response.raise_for_status()
         status_json = status_response.json()
@@ -97,10 +100,12 @@ backtest_payload = {
 print(f"Creating backtest named: '{backtest_name}'")
 
 try:
-    backtest_response = session.post(
+    auth, headers = get_auth_and_headers()
+    backtest_response = requests.post(
         backtest_create_url,
         json=backtest_payload,
-        headers=get_headers()
+        headers=headers,
+        auth=auth
     )
     backtest_response.raise_for_status()
     backtest_json = backtest_response.json()
