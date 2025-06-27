@@ -1,12 +1,13 @@
-# run_backtest.py (Final Version - With lean init)
+# run_backtest.py (Final Version - Clean Workspace)
 import os
 import subprocess
 import sys
 
 # --- Settings ---
 QC_PROJECT_NAME = "23708106"
-# The output path must be inside the project folder that gets created
-OUTPUT_FILE_PATH = f"{QC_PROJECT_NAME}/backtest-results.json"
+WORKSPACE_DIR = "lean_workspace"
+# The output path is now inside the workspace directory
+OUTPUT_FILE_PATH = f"{WORKSPACE_DIR}/{QC_PROJECT_NAME}/backtest-results.json"
 
 # --- Get Credentials from GitHub Secrets ---
 try:
@@ -16,27 +17,32 @@ except KeyError:
     print("ERROR: Make sure QC_USER_ID and QC_API_TOKEN are set.")
     sys.exit(1)
 
-# --- 1. Log in to LEAN CLI ---
+# --- 1. Create and move into a clean workspace directory ---
+print(f"Creating clean workspace at ./{WORKSPACE_DIR}")
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
+# All subsequent commands will run from inside this directory
+os.chdir(WORKSPACE_DIR)
+
+# --- 2. Log in to LEAN CLI ---
 print("Logging into LEAN CLI...")
 login_command = ["lean", "login", "--user-id", QC_USER_ID, "--api-token", QC_API_TOKEN]
 subprocess.run(login_command, check=True, capture_output=True, text=True)
 print("Successfully logged in.")
 
-# --- 2. Initialize the LEAN Workspace ---
-# This is the critical missing step that creates the lean.json file.
+# --- 3. Initialize the LEAN Workspace ---
+# This will now run in an empty directory, preventing the prompt.
 print("Initializing LEAN workspace...")
 init_command = ["lean", "init"]
 try:
     subprocess.run(init_command, check=True, capture_output=True, text=True)
     print("Successfully initialized workspace.")
 except subprocess.CalledProcessError as e:
-    print(f"ERROR: 'lean init' failed. This can happen if the directory is not empty.")
+    print(f"ERROR: 'lean init' failed unexpectedly.")
     print("Output:", e.stdout)
     print("Error Output:", e.stderr)
     sys.exit(1)
 
-
-# --- 3. Pull Cloud Project to Local Environment ---
+# --- 4. Pull Cloud Project into the Workspace ---
 print(f"Pulling cloud project '{QC_PROJECT_NAME}'...")
 pull_command = ["lean", "cloud", "pull", "--project", QC_PROJECT_NAME]
 try:
@@ -48,12 +54,14 @@ except subprocess.CalledProcessError as e:
     print("Error Output:", e.stderr)
     sys.exit(1)
 
-# --- 4. Run the Backtest on the Local Project Files ---
+# --- 5. Run the Backtest ---
 print(f"Starting cloud backtest for project '{QC_PROJECT_NAME}'...")
+# The output path needs to be relative to the workspace now
+relative_output_path = f"{QC_PROJECT_NAME}/backtest-results.json"
 backtest_command = [
     "lean", "backtest",
     QC_PROJECT_NAME,
-    "--output", OUTPUT_FILE_PATH,
+    "--output", relative_output_path,
     "--detach",
     "--no-update"
 ]
