@@ -3,6 +3,7 @@ import os
 import requests
 import time
 import json
+import hashlib # <--- THIS LINE IS THE FIX
 
 # --- Settings ---
 # IMPORTANT: Make sure this is your actual QuantConnect Project ID
@@ -17,24 +18,18 @@ except KeyError:
     print("ERROR: Make sure you have set QC_USER_ID and QC_API_TOKEN in your repository's secrets.")
     exit(1)
 
-# --- API Authentication Header ---
-# We will construct the full auth header for each request
+# --- API Header ---
+headers = {
+    "Accept": "application/json"
+}
 
 # --- 1. Compile the Project ---
 compile_url = f"{QC_API_URL}/projects/{QC_PROJECT_ID}/compile"
-# The timestamp is required for authentication
 timestamp = int(time.time())
-# The signature is a hash of your token, the timestamp, and an optional nonce
 signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
-
-headers = {
-    "Accept": "application/json",
-    # The timestamp must be passed in the header
-    "Timestamp": str(timestamp)
-}
+headers["Timestamp"] = str(timestamp)
 
 print(f"Submitting compile request for project {QC_PROJECT_ID}...")
-# The user ID and signature are passed as basic auth
 compile_response = requests.post(
     compile_url, 
     headers=headers,
@@ -52,11 +47,11 @@ print(f"Successfully submitted compile job with ID: {compile_id}")
 # --- 2. Wait for Compile to Complete ---
 while True:
     status_url = f"{QC_API_URL}/compiles/read?compileId={compile_id}"
-
+    
     timestamp = int(time.time())
     signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
     headers["Timestamp"] = str(timestamp)
-
+    
     status_response = requests.get(status_url, headers=headers, auth=(QC_USER_ID, signature)).json()
     state = status_response.get("state")
     print(f"Compile state is: {state}")
