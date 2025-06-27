@@ -1,11 +1,13 @@
-# store_results.py (Final Version - Using LEAN CLI Output)
+# store_results.py (Final Version - Corrected Path)
 import os
 import json
 from google.cloud import firestore
 import sys
 
 # --- Settings ---
-RESULTS_FILE_PATH = "backtest_results.json"
+QC_PROJECT_NAME = "23708106"
+# The path must now include the project directory
+RESULTS_FILE_PATH = f"{QC_PROJECT_NAME}/backtest-results.json"
 
 # --- Get Credentials from GitHub Secrets ---
 try:
@@ -38,14 +40,12 @@ except json.JSONDecodeError:
     print(f"ERROR: Could not decode JSON from '{RESULTS_FILE_PATH}'. The file may be empty or corrupt.")
     sys.exit(1)
 
-# The backtest ID is now inside the results file
 backtest_id = results_data.get("backtestId")
 if not backtest_id:
     print("ERROR: 'backtestId' not found in results JSON.")
     sys.exit(1)
 
 # --- 2. Prepare and Upload Data to Firestore ---
-# The structure of the results from LEAN CLI is the same as the API
 statistics = results_data.get("statistics", {})
 charts = results_data.get("charts", {})
 
