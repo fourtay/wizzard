@@ -1,5 +1,4 @@
 # requirements.txt
-lean
 google-cloud-firestore
 google-auth
 pandas
