@@ -7,7 +7,7 @@ import hashlib # <--- THIS LINE IS THE FIX
 
 # --- Settings ---
 # IMPORTANT: Make sure this is your actual QuantConnect Project ID
-QC_PROJECT_ID = 1234567 # If you haven't already, change this!
+QC_PROJECT_ID = 23708106 # If you haven't already, change this!
 QC_API_URL = "https://www.quantconnect.com/api/v2"
 
 # --- Get Credentials from GitHub Secrets ---
