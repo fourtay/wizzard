@@ -1,4 +1,4 @@
-# store_results.py (Final Version - Corrected Workspace Path)
+# store_results.py (Verify This Is Your Current Version)
 import os
 import json
 from google.cloud import firestore
@@ -6,9 +6,7 @@ import sys
 
 # --- Settings ---
 QC_PROJECT_NAME = "23708106"
-WORKSPACE_DIR = "lean_workspace"
-# The path must now include the workspace directory
-RESULTS_FILE_PATH = f"{WORKSPACE_DIR}/{QC_PROJECT_NAME}/backtest-results.json"
+RESULTS_FILE_PATH = f"{QC_PROJECT_NAME}/backtest-results.json" # The path must include the project directory
 
 # --- Get Credentials from GitHub Secrets ---
 try:
