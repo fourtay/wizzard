@@ -5,8 +5,8 @@ import time
 import json
 
 # --- Settings ---
-# IMPORTANT: Replace 1234567 with your actual QuantConnect Project ID
-QC_PROJECT_ID = 23708106
+# IMPORTANT: Make sure this is your actual QuantConnect Project ID
+QC_PROJECT_ID = 1234567 # If you haven't already, change this!
 QC_API_URL = "https://www.quantconnect.com/api/v2"
 
 # --- Get Credentials from GitHub Secrets ---
@@ -17,16 +17,29 @@ except KeyError:
     print("ERROR: Make sure you have set QC_USER_ID and QC_API_TOKEN in your repository's secrets.")
     exit(1)
 
-# --- API Headers ---
-headers = {
-    "Accept": "application/json",
-    "Authorization": f"Basic {requests.auth._basic_auth_str(QC_USER_ID, QC_API_TOKEN)}"
-}
+# --- API Authentication Header ---
+# We will construct the full auth header for each request
 
 # --- 1. Compile the Project ---
 compile_url = f"{QC_API_URL}/projects/{QC_PROJECT_ID}/compile"
+# The timestamp is required for authentication
+timestamp = int(time.time())
+# The signature is a hash of your token, the timestamp, and an optional nonce
+signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
+
+headers = {
+    "Accept": "application/json",
+    # The timestamp must be passed in the header
+    "Timestamp": str(timestamp)
+}
+
 print(f"Submitting compile request for project {QC_PROJECT_ID}...")
-compile_response = requests.post(compile_url, headers=headers)
+# The user ID and signature are passed as basic auth
+compile_response = requests.post(
+    compile_url, 
+    headers=headers,
+    auth=(QC_USER_ID, signature)
+)
 
 if not compile_response.json().get("success"):
     print("ERROR: Compile request failed.")
@@ -39,7 +52,12 @@ print(f"Successfully submitted compile job with ID: {compile_id}")
 # --- 2. Wait for Compile to Complete ---
 while True:
     status_url = f"{QC_API_URL}/compiles/read?compileId={compile_id}"
-    status_response = requests.get(status_url, headers=headers).json()
+
+    timestamp = int(time.time())
+    signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
+    headers["Timestamp"] = str(timestamp)
+
+    status_response = requests.get(status_url, headers=headers, auth=(QC_USER_ID, signature)).json()
     state = status_response.get("state")
     print(f"Compile state is: {state}")
     if state in ["Success", "Error"]:
@@ -61,8 +79,17 @@ backtest_payload = {
     "name": backtest_name
 }
 
+timestamp = int(time.time())
+signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
+headers["Timestamp"] = str(timestamp)
+
 print(f"Creating backtest named: '{backtest_name}'")
-backtest_response = requests.post(backtest_url, json=backtest_payload, headers=headers)
+backtest_response = requests.post(
+    backtest_url, 
+    json=backtest_payload, 
+    headers=headers,
+    auth=(QC_USER_ID, signature)
+)
 
 if not backtest_response.json().get("success"):
     print("ERROR: Backtest creation failed.")
