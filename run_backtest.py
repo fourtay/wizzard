@@ -1,16 +1,13 @@
-# run_backtest.py (Final Version - Using LEAN CLI)
+# run_backtest.py (Final Version - With Cloud Pull)
 import os
 import subprocess
 import sys
 
 # --- Settings ---
-# Go to your project on QuantConnect, and in the URL, you will see something like:
-# https://www.quantconnect.com/project/23708106
-# The project name is the part of the URL *after* your username.
-# Often, it's a number, but it can be a name if you changed it.
-# For this example, we assume the project is named "23708106"
+# This is the name of your project in the QuantConnect cloud.
+# It can be the number from the URL or a name if you've changed it.
 QC_PROJECT_NAME = "23708106"
-OUTPUT_FILE_PATH = "backtest_results.json"
+OUTPUT_FILE_PATH = f"./{QC_PROJECT_NAME}/backtest_results.json"
 
 # --- Get Credentials from GitHub Secrets ---
 try:
@@ -21,26 +18,38 @@ except KeyError:
     sys.exit(1)
 
 # --- 1. Log in to LEAN CLI ---
-# This command configures the CLI with your credentials.
 print("Logging into LEAN CLI...")
 login_command = [
     "lean", "login",
     "--user-id", QC_USER_ID,
     "--api-token", QC_API_TOKEN
 ]
-# We run it but don't need to see the output unless there's an error.
 subprocess.run(login_command, check=True, capture_output=True, text=True)
 print("Successfully logged in.")
 
-# --- 2. Run the Backtest via LEAN CLI ---
-# This single command handles everything: pulling the project, compiling, and running.
-# --output specifies where to save the results JSON.
-# --detach runs it on QuantConnect's cloud.
-# --no-update tells it not to self-update, for stability in automation.
+# --- 2. Pull Cloud Project to Local Environment ---
+# This is the new, critical step. It downloads the project files.
+print(f"Pulling cloud project '{QC_PROJECT_NAME}'...")
+pull_command = [
+    "lean", "cloud", "pull",
+    "--project", QC_PROJECT_NAME
+]
+try:
+    subprocess.run(pull_command, check=True, capture_output=True, text=True)
+    print("Successfully pulled project files.")
+except subprocess.CalledProcessError as e:
+    print(f"ERROR: Failed to pull cloud project '{QC_PROJECT_NAME}'.")
+    print("Return Code:", e.returncode)
+    print("Output:", e.stdout)
+    print("Error Output:", e.stderr)
+    sys.exit(1)
+
+# --- 3. Run the Backtest on the Local Project Files ---
+# Now that the folder exists locally, this command will work.
 print(f"Starting cloud backtest for project '{QC_PROJECT_NAME}'...")
 backtest_command = [
     "lean", "backtest",
-    QC_PROJECT_NAME,
+    QC_PROJECT_NAME,  # This now correctly refers to the local folder we just created
     "--output", OUTPUT_FILE_PATH,
     "--detach",
     "--no-update"
@@ -49,7 +58,7 @@ backtest_command = [
 try:
     process = subprocess.run(
         backtest_command,
-        check=True,  # This will raise an error if the command fails
+        check=True,
         capture_output=True,
         text=True
     )
