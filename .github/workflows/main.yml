@@ -1,4 +1,3 @@
-# .github/workflows/main.yml (Definitive Shell-Based Workflow)
 name: Run Automated QuantConnect Backtest
 
 on:
@@ -27,22 +26,16 @@ jobs:
       - name: 4. Authenticate LEAN CLI
         run: |
           lean login --user-id ${{ secrets.QC_USER_ID }} --api-token ${{ secrets.QC_API_TOKEN }}
-        
-      - name: 5. Initialize LEAN Workspace (Non-Interactive)
+
+      - name: 5. Initialize LEAN Workspace Non-Interactively
         run: |
-          # The "yes |" command automatically answers 'y' to any confirmation prompts.
-          # This forces the command to run non-interactively.
           yes | lean init --language python
 
-      - name: 6. Pull Cloud Project
+      - name: 6. Run Cloud Backtest (No Local Directory Required)
         run: |
-          lean cloud pull --project "23708106"
+          lean cloud backtest --project "23708106" --output "backtest-results.json"
 
-      - name: 7. Run Cloud Backtest
-        run: |
-          lean backtest "23708106" --output "23708106/backtest-results.json" --detach --no-update
-
-      - name: 8. Store Results in Firestore
+      - name: 7. Store Results in Firestore
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python store_results.py
