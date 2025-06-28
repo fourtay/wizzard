@@ -45,4 +45,5 @@ jobs:
 
       - name: 8. Store Results in Firestore
         env:
-          GCP_SA_
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: python store_results.py
