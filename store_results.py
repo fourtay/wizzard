@@ -40,22 +40,18 @@ except json.JSONDecodeError:
     print("ERROR: Invalid JSON format.")
     sys.exit(1)
 
-# --- Extract actual data ---
-results_section = results_data.get("results", {})
-print("DEBUG: Top-level keys inside 'results':", results_section.keys())
-
-statistics = results_section.get("statistics", {})
-charts = results_section.get("charts", {})
+# --- Extract data from top level ---
+statistics = results_data.get("statistics", {})
+charts = results_data.get("charts", {})
+name = results_data.get("name", "Unknown")
 
 if not statistics:
-    print("ERROR: No 'statistics' found in results['statistics'].")
-    print("DEBUG: 'results' section was:")
-    print(json.dumps(results_section, indent=2))
+    print("ERROR: No 'statistics' found in top-level JSON.")
     sys.exit(1)
 
 # --- Upload to Firestore ---
 data_to_upload = {
-    "name": results_data.get("name", "Unknown"),
+    "name": name,
     "createdAt": firestore.SERVER_TIMESTAMP,
     "statistics": statistics,
     "charts": charts
