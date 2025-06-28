@@ -31,7 +31,7 @@ try:
     with open(RESULTS_FILE_PATH, "r") as f:
         results_data = json.load(f)
         print("=== FULL BACKTEST JSON ===")
-        print(json.dumps(results_data, indent=2))  # 👈 TEMP: See what's really in the file
+        print(json.dumps(results_data, indent=2))
         print("=== END ===")
 except FileNotFoundError:
     print(f"ERROR: File '{RESULTS_FILE_PATH}' not found.")
@@ -40,14 +40,16 @@ except json.JSONDecodeError:
     print("ERROR: Invalid JSON format.")
     sys.exit(1)
 
-# --- Extract and Upload ---
-statistics = results_data.get("statistics", {})
-charts = results_data.get("charts", {})
+# --- Extract actual data ---
+results_section = results_data.get("results", {})
+statistics = results_section.get("statistics", {})
+charts = results_section.get("charts", {})
 
 if not statistics:
-    print("ERROR: No 'statistics' found in backtest results.")
+    print("ERROR: No 'statistics' found in results['statistics'].")
     sys.exit(1)
 
+# --- Upload to Firestore ---
 data_to_upload = {
     "name": results_data.get("name", "Unknown"),
     "createdAt": firestore.SERVER_TIMESTAMP,
@@ -58,4 +60,5 @@ data_to_upload = {
 print(f"Uploading results to Firestore with document ID: {BACKTEST_ID}")
 doc_ref = db.collection("backtest_results").document(BACKTEST_ID)
 doc_ref.set(data_to_upload)
+
 print("✅ Successfully uploaded backtest results to Firestore!")
