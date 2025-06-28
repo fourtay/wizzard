@@ -39,10 +39,10 @@ jobs:
           echo "==== FULL BACKTEST OUTPUT ===="
           echo "$BACKTEST_OUTPUT"
 
-          # Attempt to extract backtest ID
-          BACKTEST_ID=$(echo "$BACKTEST_OUTPUT" | grep -oE 'backtest-[a-zA-Z0-9]+' | head -n 1)
-
+          # Extract Backtest ID from "Backtest id: <ID>" line
+          BACKTEST_ID=$(echo "$BACKTEST_OUTPUT" | grep -i "Backtest id:" | awk '{print $3}')
           echo "Extracted BACKTEST_ID=$BACKTEST_ID"
+
           echo "BACKTEST_ID=$BACKTEST_ID" >> $GITHUB_ENV
 
       - name: 7. Download Backtest Results via API
