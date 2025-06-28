@@ -1,12 +1,10 @@
-# store_results.py (Verify This Is Your Current Version)
 import os
 import json
 from google.cloud import firestore
 import sys
 
 # --- Settings ---
-QC_PROJECT_NAME = "23708106"
-RESULTS_FILE_PATH = f"{QC_PROJECT_NAME}/backtest-results.json" # The path must include the project directory
+RESULTS_FILE_PATH = "backtest-results.json"
 
 # --- Get Credentials from GitHub Secrets ---
 try:
@@ -26,8 +24,7 @@ except Exception as e:
     print(f"ERROR: Failed to connect to Firestore: {e}")
     sys.exit(1)
 
-
-# --- 1. Read the Local JSON Results File ---
+# --- Read the Local JSON Results File ---
 print(f"Reading results from '{RESULTS_FILE_PATH}'...")
 try:
     with open(RESULTS_FILE_PATH, "r") as f:
@@ -44,7 +41,7 @@ if not backtest_id:
     print("ERROR: 'backtestId' not found in results JSON.")
     sys.exit(1)
 
-# --- 2. Prepare and Upload Data to Firestore ---
+# --- Prepare and Upload Data to Firestore ---
 statistics = results_data.get("statistics", {})
 charts = results_data.get("charts", {})
 
