@@ -24,7 +24,7 @@ except Exception as e:
     print(f"ERROR: Failed to connect to Firestore: {e}")
     sys.exit(1)
 
-# --- Read the Local JSON Results File ---
+# --- 1. Read the Local JSON Results File ---
 print(f"Reading results from '{RESULTS_FILE_PATH}'...")
 try:
     with open(RESULTS_FILE_PATH, "r") as f:
@@ -41,7 +41,7 @@ if not backtest_id:
     print("ERROR: 'backtestId' not found in results JSON.")
     sys.exit(1)
 
-# --- Prepare and Upload Data to Firestore ---
+# --- 2. Prepare and Upload Data to Firestore ---
 statistics = results_data.get("statistics", {})
 charts = results_data.get("charts", {})
 
