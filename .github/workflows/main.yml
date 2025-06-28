@@ -31,9 +31,9 @@ jobs:
         run: |
           yes | lean init --language python
 
-      - name: 6. Run Cloud Backtest (No Local Directory Required)
+      - name: 6. Run Cloud Backtest (Corrected)
         run: |
-          lean cloud backtest --project "23708106" --output "backtest-results.json"
+          lean cloud backtest "23708106" --output "backtest-results.json"
 
       - name: 7. Store Results in Firestore
         env:
