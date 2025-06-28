@@ -6,7 +6,7 @@ import sys
 # --- Settings ---
 RESULTS_FILE_PATH = "backtest-results.json"
 
-# --- Get Credentials from GitHub Secrets ---
+# --- Get Credentials ---
 try:
     GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
     BACKTEST_ID = os.environ["BACKTEST_ID"]
@@ -14,7 +14,7 @@ except KeyError:
     print("ERROR: Required secret or env var not set (GCP_SA_KEY or BACKTEST_ID).")
     sys.exit(1)
 
-# --- Authenticate with Google Cloud ---
+# --- Authenticate with Firestore ---
 try:
     with open("gcp_key.json", "w") as f:
         f.write(GCP_SA_KEY_JSON)
@@ -30,6 +30,9 @@ print(f"Reading results from '{RESULTS_FILE_PATH}'...")
 try:
     with open(RESULTS_FILE_PATH, "r") as f:
         results_data = json.load(f)
+        print("=== FULL BACKTEST JSON ===")
+        print(json.dumps(results_data, indent=2))  # 👈 TEMP: See what's really in the file
+        print("=== END ===")
 except FileNotFoundError:
     print(f"ERROR: File '{RESULTS_FILE_PATH}' not found.")
     sys.exit(1)
@@ -37,7 +40,7 @@ except json.JSONDecodeError:
     print("ERROR: Invalid JSON format.")
     sys.exit(1)
 
-# --- Validate and Upload ---
+# --- Extract and Upload ---
 statistics = results_data.get("statistics", {})
 charts = results_data.get("charts", {})
 
@@ -55,5 +58,4 @@ data_to_upload = {
 print(f"Uploading results to Firestore with document ID: {BACKTEST_ID}")
 doc_ref = db.collection("backtest_results").document(BACKTEST_ID)
 doc_ref.set(data_to_upload)
-
 print("✅ Successfully uploaded backtest results to Firestore!")
