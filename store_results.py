@@ -1,72 +1,82 @@
-import os, json, sys
+import os, sys, json, pathlib
+from collections import deque
 from google.cloud import firestore
 
-# ───────────────────────── CONSTANTS ──────────────────────────
-RESULTS_FILE_PATH = "backtest-results.json"      # file created by the workflow
-COLLECTION_NAME  = "backtest_results"            # Firestore collection name
-# ───────────────────────── ENV VARIABLES ──────────────────────
+# ──────────────────────────── CONSTANTS ────────────────────────────
+RESULTS_FILE = pathlib.Path("backtest-results.json")   # LEAN CLI output
+COLLECTION    = "backtest_results"                    # Firestore collection
+# ────────────────────────── ENV-VAR CHECKS ─────────────────────────
 try:
-    GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]   # secret from GitHub
-    BACKTEST_ID     = os.environ["BACKTEST_ID"]  # set in the workflow
+    SERVICE_KEY = os.environ["GCP_SA_KEY"]            # GitHub secret
+    BACKTEST_ID = os.environ["BACKTEST_ID"]           # set in workflow
 except KeyError:
-    print("❌  GCP_SA_KEY or BACKTEST_ID env-var missing"); sys.exit(1)
+    print("❌  Missing env vars GCP_SA_KEY or BACKTEST_ID"); sys.exit(1)
 
-# ───────────────────────── FIRESTORE LOGIN ────────────────────
-with open("gcp_key.json", "w") as f:              # write key file
-    f.write(GCP_SA_KEY_JSON)
+# ────────────────────────── FIRESTORE LOGIN ───────────────────────
+with open("gcp_key.json", "w") as f:
+    f.write(SERVICE_KEY)
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
 db = firestore.Client()
 print("✅  Connected to Firestore")
 
-# ───────────────────────── READ RESULT FILE ───────────────────
-print(f"📖  Reading {RESULTS_FILE_PATH} …")
-try:
-    with open(RESULTS_FILE_PATH, "r") as f:
+# ────────────────────────── LOAD RESULT JSON ──────────────────────
+if not RESULTS_FILE.exists():
+    print(f"❌  {RESULTS_FILE} not found"); sys.exit(1)
+
+with RESULTS_FILE.open() as f:
+    try:
         data = json.load(f)
-except FileNotFoundError:
-    print("❌  results file not found"); sys.exit(1)
-except json.JSONDecodeError:
-    print("❌  results file is not valid JSON"); sys.exit(1)
+    except json.JSONDecodeError:
+        print("❌  results file is not valid JSON"); sys.exit(1)
 
-# ───────────────────────── EXTRACT STATISTICS ─────────────────
-"""
-Different LEAN CLI versions write stats in slightly different places.
-We try the known patterns in order until we find one that works.
-"""
-statistics = {}
-charts     = {}
+# ------------------------------------------------------------------
+#  UTIL: breadth–first search for first dict containing key pattern
+# ------------------------------------------------------------------
+def find_section(root: dict, candidate_keys: list[str]) -> dict | None:
+    queue = deque([root])
+    while queue:
+        node = queue.popleft()
+        if isinstance(node, dict):
+            if any(k in node for k in candidate_keys):
+                return node
+            queue.extend(node.values())
+        elif isinstance(node, list):
+            queue.extend(node)
+    return None
 
-# pattern 1: top-level "statistics"
-if "statistics" in data and data["statistics"]:
-    statistics = data["statistics"]
-    charts     = data.get("charts", {})
+# ────────────────────── EXTRACT STATISTICS / CHARTS ───────────────
+# Keys we accept as "statistics"
+STAT_KEYS = [
+    "statistics",
+    "portfolioStatistics",
+    "totalNetProfit",     # leaf-level heuristics
+    "sharpeRatio",
+]
 
-# pattern 2: inside "results" -> "statistics"
-elif "results" in data and isinstance(data["results"], dict):
-    inner = data["results"]
-    if "statistics" in inner and inner["statistics"]:
-        statistics = inner["statistics"]
-        charts     = inner.get("charts", {})
+section = find_section(data, STAT_KEYS)
 
-# pattern 3: inside "results" -> "portfolioStatistics"
-elif "results" in data and "portfolioStatistics" in data["results"]:
-    statistics = data["results"]["portfolioStatistics"]
-    charts     = data["results"].get("charts", {})
+if not section:
+    print("❌  Could not locate statistics block in JSON – aborting."); sys.exit(1)
 
-# add more fallbacks here if necessary …
+# Normalise what we found ──────────────────────────────────────────
+statistics = (
+    section.get("statistics")
+    or section.get("portfolioStatistics")
+    or {k: section[k] for k in section if isinstance(section[k], (int, float, str))}
+)
 
-if not statistics:
-    print("❌  Could not locate statistics block in JSON. Aborting.")
-    sys.exit(1)
+charts = section.get("charts") or data.get("charts") or {}
 
-# ───────────────────────── UPLOAD TO FIRESTORE ────────────────
+print("📊  Statistics keys found:", list(statistics.keys())[:10], "…")
+
+# ──────────────────────── UPLOAD TO FIRESTORE ─────────────────────
 payload = {
     "name"      : data.get("name", "Unnamed Backtest"),
     "createdAt" : firestore.SERVER_TIMESTAMP,
     "statistics": statistics,
-    "charts"    : charts
+    "charts"    : charts,
 }
 
-print(f"⬆️  Uploading document ID '{BACKTEST_ID}' to '{COLLECTION_NAME}' …")
-db.collection(COLLECTION_NAME).document(BACKTEST_ID).set(payload)
+print(f"⬆️  Uploading document '{BACKTEST_ID}' to '{COLLECTION}' …")
+db.collection(COLLECTION).document(BACKTEST_ID).set(payload)
 print("🎉  Backtest results uploaded successfully!")
