@@ -42,11 +42,15 @@ except json.JSONDecodeError:
 
 # --- Extract actual data ---
 results_section = results_data.get("results", {})
+print("DEBUG: Top-level keys inside 'results':", results_section.keys())
+
 statistics = results_section.get("statistics", {})
 charts = results_section.get("charts", {})
 
 if not statistics:
     print("ERROR: No 'statistics' found in results['statistics'].")
+    print("DEBUG: 'results' section was:")
+    print(json.dumps(results_section, indent=2))
     sys.exit(1)
 
 # --- Upload to Firestore ---
