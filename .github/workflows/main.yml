@@ -27,15 +27,22 @@ jobs:
         run: |
           lean login --user-id ${{ secrets.QC_USER_ID }} --api-token ${{ secrets.QC_API_TOKEN }}
 
-      - name: 5. Initialize LEAN Workspace Non-Interactively
+      - name: 5. Initialize LEAN Workspace
         run: |
           yes | lean init --language python
 
-      - name: 6. Run Cloud Backtest (Corrected)
+      - name: 6. Run Cloud Backtest and Capture Backtest ID
+        id: run_backtest
         run: |
-          lean cloud backtest "23708106" --output "backtest-results.json"
+          BACKTEST_OUTPUT=$(lean cloud backtest "23708106")
+          echo "$BACKTEST_OUTPUT"
+          BACKTEST_ID=$(echo "$BACKTEST_OUTPUT" | grep -oE 'backtest-[a-zA-Z0-9]+' | head -n 1)
+          echo "BACKTEST_ID=$BACKTEST_ID" >> $GITHUB_ENV
 
-      - name: 7. Store Results in Firestore
+      - name: 7. Download Backtest Results
+        run: |
+          lean cloud backtest-results "23708106" --backtest-id ${{ env.BACKTEST_ID }} --output backtest-results.json
+
+      - name: 8. Store Results in Firestore
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: python store_results.py
+          GCP_SA_
