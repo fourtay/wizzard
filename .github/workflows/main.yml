@@ -39,11 +39,15 @@ jobs:
           BACKTEST_ID=$(echo "$BACKTEST_OUTPUT" | grep -oE 'backtest-[a-zA-Z0-9]+' | head -n 1)
           echo "BACKTEST_ID=$BACKTEST_ID" >> $GITHUB_ENV
 
-      - name: 7. Download Backtest Results
-        run: |
-          lean cloud backtest-results "23708106" --backtest-id ${{ env.BACKTEST_ID }} --output backtest-results.json
+      - name: 7. Download Backtest Results via API
+        env:
+          QC_USER_ID: ${{ secrets.QC_USER_ID }}
+          QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
+          BACKTEST_ID: ${{ env.BACKTEST_ID }}
+        run: python download_results.py
 
       - name: 8. Store Results in Firestore
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python store_results.py
+
