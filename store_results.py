@@ -1,65 +1,68 @@
 import os, json, sys, re
 from google.cloud import firestore
 
-# ---------- Settings ----------
 RESULTS_FILE_PATH = "backtest-results.json"
 
-# ---------- Credentials ----------
+# --- cred ---
 try:
     GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
     BACKTEST_ID     = os.environ["BACKTEST_ID"]
-except KeyError:
-    print("❌  GCP_SA_KEY or BACKTEST_ID env-var missing")
+except KeyError as e:
+    print(f"❌  Missing env var: {e}")
     sys.exit(1)
 
 with open("gcp_key.json", "w") as f:
     f.write(GCP_SA_KEY_JSON)
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
 db = firestore.Client()
-print("✅  Connected to Firestore")
+print("✅  Firestore connected")
 
-# ---------- Read results ----------
+# --- read results ---
 try:
-    with open(RESULTS_FILE_PATH, "r") as f:
+    with open(RESULTS_FILE_PATH) as f:
         raw = json.load(f)
 except Exception as e:
     print(f"❌  Cannot read {RESULTS_FILE_PATH}: {e}")
     sys.exit(1)
 
-# ---------- Helpers ----------
-pct_re = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%?\s*$")     # grabs the number, ignores a trailing %
-def to_number(val: str) -> float:
-    """
-    "12.93%"  -> 12.93
-    "0.145"   -> 0.145
-    42        -> 42
-    """
-    if isinstance(val, (int, float)):
-        return float(val)
-    m = pct_re.match(str(val))
+# --- helper: str → float ------------------------------------------------------
+import re
+_pct = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%?\s*$")
+def to_float(x):
+    if isinstance(x, (int, float)):
+        return float(x)
+    m = _pct.match(str(x))
     if not m:
-        raise ValueError(f"Cannot convert '{val}' to float")
+        raise ValueError
     return float(m.group(1))
 
-# ---------- Clean statistics ----------
-stats_src = raw.get("statistics") or raw.get("results", {}).get("statistics")
-if not stats_src:
-    print("❌  'statistics' block not found")
+# --- harvest statistics regardless of nesting --------------------------------
+stats = {}
+
+def walk(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.startswith("statistics."):
+                try:
+                    stats[k.split(".", 1)[1]] = to_float(v)
+                except ValueError:
+                    pass                         # skip non-numeric
+            walk(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            walk(item)
+
+walk(raw)
+
+if not stats:
+    print("❌  No statistics.* fields found anywhere in JSON")
+    print("Top-level keys:", list(raw.keys())[:10])
     sys.exit(1)
 
-statistics = {}
-for k, v in stats_src.items():
-    try:
-        statistics[k] = to_number(v)
-    except ValueError:
-        print(f"⚠️  Skipping non-numeric field {k}: {v}")
-
-# ---------- Upload ----------
-doc_ref = db.collection("backtest_results").document(BACKTEST_ID)
-doc_ref.set({
+# --- upload ------------------------------------------------------------------
+db.collection("backtest_results").document(BACKTEST_ID).set({
     "name"      : raw.get("name", "Unnamed Backtest"),
     "createdAt" : firestore.SERVER_TIMESTAMP,
-    "statistics": statistics,
-    "charts"    : raw.get("charts", {})
+    "statistics": stats,
 })
-print("✅  Uploaded numeric stats for", BACKTEST_ID)
+print(f"✅  Uploaded {len(stats)} numeric fields for {BACKTEST_ID}")
