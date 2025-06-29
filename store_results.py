@@ -1,82 +1,58 @@
-import os, sys, json, pathlib
-from collections import deque
+import os, sys, json
 from google.cloud import firestore
 
-# ──────────────────────────── CONSTANTS ────────────────────────────
-RESULTS_FILE = pathlib.Path("backtest-results.json")   # LEAN CLI output
-COLLECTION    = "backtest_results"                    # Firestore collection
-# ────────────────────────── ENV-VAR CHECKS ─────────────────────────
-try:
-    SERVICE_KEY = os.environ["GCP_SA_KEY"]            # GitHub secret
-    BACKTEST_ID = os.environ["BACKTEST_ID"]           # set in workflow
-except KeyError:
-    print("❌  Missing env vars GCP_SA_KEY or BACKTEST_ID"); sys.exit(1)
+# ---------- constants ----------
+RESULTS_FILE = "backtest-results.json"
+COLLECTION    = "backtest_results"        # 1 collection for all runs
 
-# ────────────────────────── FIRESTORE LOGIN ───────────────────────
+# ---------- env vars ----------
+try:
+    gcp_key      = os.environ["GCP_SA_KEY"]
+    BACKTEST_ID  = os.environ["BACKTEST_ID"]
+except KeyError:
+    print("❌  GCP_SA_KEY or BACKTEST_ID not set"); sys.exit(1)
+
+# ---------- Firestore auth ----------
 with open("gcp_key.json", "w") as f:
-    f.write(SERVICE_KEY)
+    f.write(gcp_key)
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
+
 db = firestore.Client()
 print("✅  Connected to Firestore")
 
-# ────────────────────────── LOAD RESULT JSON ──────────────────────
-if not RESULTS_FILE.exists():
-    print(f"❌  {RESULTS_FILE} not found"); sys.exit(1)
+# ---------- read results ----------
+try:
+    with open(RESULTS_FILE, "r") as f:
+        payload = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError) as e:
+    print(f"❌  Reading {RESULTS_FILE}: {e}"); sys.exit(1)
 
-with RESULTS_FILE.open() as f:
-    try:
-        data = json.load(f)
-    except json.JSONDecodeError:
-        print("❌  results file is not valid JSON"); sys.exit(1)
+print("📖  Parsing backtest JSON …")
 
-# ------------------------------------------------------------------
-#  UTIL: breadth–first search for first dict containing key pattern
-# ------------------------------------------------------------------
-def find_section(root: dict, candidate_keys: list[str]) -> dict | None:
-    queue = deque([root])
-    while queue:
-        node = queue.popleft()
-        if isinstance(node, dict):
-            if any(k in node for k in candidate_keys):
-                return node
-            queue.extend(node.values())
-        elif isinstance(node, list):
-            queue.extend(node)
-    return None
+# ----- locate statistics no matter which schema -----
+stats  = {}
+charts = {}
 
-# ────────────────────── EXTRACT STATISTICS / CHARTS ───────────────
-# Keys we accept as "statistics"
-STAT_KEYS = [
-    "statistics",
-    "portfolioStatistics",
-    "totalNetProfit",     # leaf-level heuristics
-    "sharpeRatio",
-]
+# Lean v2.5+ places everything under 'results'
+if "results" in payload:
+    inner = payload["results"]
+    stats  = inner.get("statistics") or inner.get("portfolioStatistics") or {}
+    charts = inner.get("charts", {})
+else:                              # older dumps put stats top-level
+    stats  = payload.get("statistics", {})
+    charts = payload.get("charts", {})
 
-section = find_section(data, STAT_KEYS)
+if not stats:
+    print("❌  Could not locate statistics block in JSON. Aborting."); sys.exit(1)
 
-if not section:
-    print("❌  Could not locate statistics block in JSON – aborting."); sys.exit(1)
-
-# Normalise what we found ──────────────────────────────────────────
-statistics = (
-    section.get("statistics")
-    or section.get("portfolioStatistics")
-    or {k: section[k] for k in section if isinstance(section[k], (int, float, str))}
-)
-
-charts = section.get("charts") or data.get("charts") or {}
-
-print("📊  Statistics keys found:", list(statistics.keys())[:10], "…")
-
-# ──────────────────────── UPLOAD TO FIRESTORE ─────────────────────
-payload = {
-    "name"      : data.get("name", "Unnamed Backtest"),
+doc = {
+    "name"      : payload.get("name", "Unnamed Backtest"),
     "createdAt" : firestore.SERVER_TIMESTAMP,
-    "statistics": statistics,
-    "charts"    : charts,
+    "statistics": stats,
+    "charts"    : charts
 }
 
-print(f"⬆️  Uploading document '{BACKTEST_ID}' to '{COLLECTION}' …")
-db.collection(COLLECTION).document(BACKTEST_ID).set(payload)
-print("🎉  Backtest results uploaded successfully!")
+# ---------- upload ----------
+print(f"⏫  Writing document id={BACKTEST_ID} …")
+db.collection(COLLECTION).document(BACKTEST_ID).set(doc)
+print("🎉  Done!  Statistics + charts are now in Firestore.")
