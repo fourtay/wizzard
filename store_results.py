@@ -3,7 +3,7 @@ from google.cloud import firestore
 
 RESULTS_FILE_PATH = "backtest-results.json"
 
-# --- cred ---
+# ---------- creds ----------
 try:
     GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
     BACKTEST_ID     = os.environ["BACKTEST_ID"]
@@ -17,7 +17,7 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
 db = firestore.Client()
 print("✅  Firestore connected")
 
-# --- read results ---
+# ---------- read ----------
 try:
     with open(RESULTS_FILE_PATH) as f:
         raw = json.load(f)
@@ -25,44 +25,44 @@ except Exception as e:
     print(f"❌  Cannot read {RESULTS_FILE_PATH}: {e}")
     sys.exit(1)
 
-# --- helper: str → float ------------------------------------------------------
-import re
-_pct = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%?\s*$")
-def to_float(x):
-    if isinstance(x, (int, float)):
-        return float(x)
-    m = _pct.match(str(x))
-    if not m:
-        raise ValueError
-    return float(m.group(1))
-
-# --- harvest statistics regardless of nesting --------------------------------
-stats = {}
-
-def walk(obj):
+# ---------- locate the first dict literally called “statistics” -------------
+def locate_stats(obj):
     if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k.startswith("statistics."):
-                try:
-                    stats[k.split(".", 1)[1]] = to_float(v)
-                except ValueError:
-                    pass                         # skip non-numeric
-            walk(v)
+        if "statistics" in obj and isinstance(obj["statistics"], dict):
+            return obj["statistics"]
+        for v in obj.values():
+            found = locate_stats(v)
+            if found:
+                return found
     elif isinstance(obj, list):
         for item in obj:
-            walk(item)
+            found = locate_stats(item)
+            if found:
+                return found
+    return None
 
-walk(raw)
-
+stats = locate_stats(raw)
 if not stats:
-    print("❌  No statistics.* fields found anywhere in JSON")
+    print("❌  Could not locate any 'statistics' dict")
     print("Top-level keys:", list(raw.keys())[:10])
     sys.exit(1)
 
-# --- upload ------------------------------------------------------------------
+# ---------- clean numbers (strip %) -----------------------------------------
+_pct = re.compile(r"^\s*([-+]?\d*\.?\d+)\s*%?\s*$")
+cleaned = {}
+for k, v in stats.items():
+    try:
+        if isinstance(v, (int, float)):
+            cleaned[k] = float(v)
+        else:
+            cleaned[k] = float(_pct.match(str(v)).group(1))
+    except Exception:
+        pass                        # skip non-numeric
+
+# ---------- upload ----------
 db.collection("backtest_results").document(BACKTEST_ID).set({
     "name"      : raw.get("name", "Unnamed Backtest"),
     "createdAt" : firestore.SERVER_TIMESTAMP,
-    "statistics": stats,
+    "statistics": cleaned,
 })
-print(f"✅  Uploaded {len(stats)} numeric fields for {BACKTEST_ID}")
+print(f"✅  Uploaded {len(cleaned)} stats fields for {BACKTEST_ID}")
