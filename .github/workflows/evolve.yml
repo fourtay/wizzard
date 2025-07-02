@@ -1,80 +1,66 @@
-# .github/workflows/evolve.yml
 name: evolve
-
-# ── When to run ────────────────────────────────────────────────────────────────
 on:
-  # every 30 min
-  schedule:
-    - cron: "*/30 * * * *"
-  # manual button in the Actions tab
   workflow_dispatch:
+  schedule:
+    # every 30 min – adjust if you need longer QC queues
+    - cron: "*/30 * * * *"
 
 jobs:
   evolve:
     runs-on: ubuntu-latest
-
-    # ── Global env vars (tweak freely) ────────────────────────────────────────
     env:
-      NUM_CHILDREN:   "5"                   # kids per generation
-      NUM_SURVIVORS:  "2"                   # winners that become parents
-      BACKTEST_COLLECTION: "backtest_results"
-
-      # required secrets – already added in GitHub → Settings → Secrets
-      QC_API_TOKEN:   ${{ secrets.QC_API_TOKEN }}
-      GCP_SA_KEY:     ${{ secrets.GCP_SA_KEY }}
-
-    # every run command is bash -e  (fail fast on errors)
-    defaults:
-      run:
-        shell: bash -e {0}
-
+      # ---------- user-controlled knobs ----------
+      NUM_CHILDREN: "5"           # how many algos per round
+      NUM_SURVIVORS: "2"          # how many winners keep breeding
+      PROJECT_ID: "23708106"      # ← your QC project ID
+      BACKTEST_COLLECTION: "backtest_results"  # Firestore collection
     steps:
-    # ── 0. checkout repo ──────────────────────────────────────────────────────
-    - name: Checkout repo
-      uses: actions/checkout@v3
 
-    # ── 1. Python toolchain ───────────────────────────────────────────────────
-    - name: Setup Python 3.10
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.10"
+      ## 1️⃣  checkout repo
+      - uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      ## 2️⃣  set up Python & Lean CLI
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install deps
+        run: |
+          pip install quantconnect-lean google-cloud-firestore
 
-    # ── 2. Generate fresh children (wizard/algo_gen.py) ───────────────────────
-    - name: Generate children 🐣
-      run: |
-        python wizard/algo_gen.py --num "$NUM_CHILDREN"
+      ## 3️⃣  generate children
+      - name: Generate new algos
+        run: |
+          python wizard/algo_gen.py --num "${{ env.NUM_CHILDREN }}"
 
-    - name: Commit children 💾
-      run: |
-        git config user.name  "evolve-bot"
-        git config user.email "evolve-bot@users.noreply.github.com"
-        git add wizard/children/
-        git commit -m "ci: add children for new generation [skip ci]" || echo "Nothing to commit"
-        git push
+      ## 4️⃣  run cloud back-tests
+      - name: Launch backtests on QC
+        env:
+          QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
+        run: |
+          python wizard/run_backtests.py
 
-    # ── 3. Kick off all back-tests in QuantConnect Cloud ──────────────────────
-    - name: Launch back-tests 🚀
-      run: |
-        python wizard/run_backtests.py
+      ## 5️⃣  wait for completion (poll QC)
+      - name: Wait for backtests to finish
+        env:
+          QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
+        run: |
+          python wizard/wait_backtests.py
 
-    - name: Wait for back-tests ⏳
-      run: |
-        python wizard/wait_backtests.py
+      ## 6️⃣  select survivors + push stats to Firestore
+      - name: Pick winners & upload stats
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          NUM_SURVIVORS: ${{ env.NUM_SURVIVORS }}
+          BACKTEST_COLLECTION: ${{ env.BACKTEST_COLLECTION }}
+        run: |
+          python wizard/select_survivors.py
 
-    # ── 4. Pick the best performers (new) ─────────────────────────────────────
-    - name: Select survivors 📊
-      run: |
-        python wizard/select_survivors.py
-
-    - name: Commit survivor list 🆕
-      run: |
-        git config user.name  "evolve-bot"
-        git config user.email "evolve-bot@users.noreply.github.com"
-        git add parents.txt
-        git commit -m "ci: update parents.txt with survivors [skip ci]" || echo "Nothing new to commit"
-        git push
+      ## 7️⃣  persist run artefacts
+      - name: Upload children & logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: evolve-${{ github.run_id }}
+          path: |
+            wizard/children/
+            wizard/backtests.json
+            parents.txt
