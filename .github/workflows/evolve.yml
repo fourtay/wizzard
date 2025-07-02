@@ -1,73 +1,67 @@
-# .github/workflows/evolve.yml
-name: evolve-and-backtest
-# ────────────────────────────────────────────────────────────
-# What it does
-#   1. Every 10 min (or when you click “Run workflow”) …
-#   2. runs wizard/algogen.py  → makes NUM_CHILDREN *.cs files
-#   3. commits those children on a throw-away branch
-#   4. calls the existing run-and-store-backtest job
-#      (same steps you’ve already wired to Firestore / Looker)
-# ────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
+#  GitHub Actions – generate child algos and push a branch
+# ──────────────────────────────────────────────────────────
+name: evolve-and-branch
+
 on:
-  workflow_dispatch:        # manual button in the UI
+  # run every 30 min
   schedule:
-    - cron: '*/10 * * * *'  # every 10 min — change if that’s too chatty
+    - cron: "*/30 * * * *"
+
+  # manual trigger with optional override
+  workflow_dispatch:
+    inputs:
+      num_children:
+        description: "How many algos to generate"
+        default: "5"
+        required: false
 
 jobs:
   evolve:
     runs-on: ubuntu-latest
 
-    # • Lean API & GCP creds are already in your repo secrets
-    # • BOT_TOKEN must be a classic PAT with “repo” scope so the
-    #   workflow can push a branch (you created this earlier).
+    # Fallback: use the input value if provided, else 5
     env:
-      LEAN_API_TOKEN:  ${{ secrets.LEAN_API_TOKEN }}
-      GCP_SA_KEY:      ${{ secrets.GCP_SA_KEY }}
-      BOT_TOKEN:       ${{ secrets.BOT_TOKEN }}
-      PYTHONPATH:      .
+      NUM_CHILDREN: ${{ github.event.inputs.num_children || '5' }}
 
     steps:
-      - name: 📥  Checkout repo
-        uses: actions/checkout@v4
+      # 1 ─ checkout full history so we can create a new branch
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0      # we need full history for branching
+          fetch-depth: 0
 
-      - name: 🐍  Install deps
+      # 2 ─ python runtime
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3 ─ install any local deps (optional; silent-fail if file absent)
+      - name: Install deps (optional)
         run: |
-          pip install -r requirements.txt
-          pip install lean==2.* fire  # lean CLI + misc
+          test -f requirements.txt && pip install --quiet -r requirements.txt || true
 
-      - name: 🧬  Generate child algos
-        run: python wizard/algogen.py
-
-      - name: 📦  Commit & push the children
-        env:
-          GIT_AUTHOR_NAME:  auto-bot
-          GIT_AUTHOR_EMAIL: bot@example.com
-          GIT_COMMITTER_NAME:  auto-bot
-          GIT_COMMITTER_EMAIL: bot@example.com
-          GITHUB_TOKEN:   ${{ env.BOT_TOKEN }}
+      # 4 ─ generate child algos
+      - name: Run algogen
         run: |
-          ts=$(date +'%Y%m%d-%H%M%S')
-          branch="evolve-$ts"
-          git checkout -b "$branch"
-          git add wizard/out/*.cs
-          if git diff --cached --quiet; then
-              echo "No new children generated – aborting."; exit 0
-          fi
-          git commit -m "evolve: add ${{ env.NUM_CHILDREN:-5 }} children ($ts)"
-          git push -u origin "$branch"
+          echo "⚙️  Generating $NUM_CHILDREN child algos…"
+          python wizard/algogen.py
 
-      # ------------------------------------------------------------------
-      # Kick off the **existing** back-test workflow against that branch.
-      #    We simply call the same composite action you’ve already set up
-      #    (run-and-store-backtest.yml) by dispatching an event to it.
-      # ------------------------------------------------------------------
-      - name: 🚀  Trigger back-test job on the new branch
+      # 5 ─ commit + push to a new branch
+      - name: Commit and push branch
+        id: branch
+        run: |
+          BRANCH="evolve-$(date +'%Y%m%d%H%M%S')"
+          git checkout -b "$BRANCH"
+          git add wizard/out
+          git commit -m "auto: add $NUM_CHILDREN child algos"
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "📤  Pushed $BRANCH"
+
+      # 6 ─ notify the back-test workflow
+      - name: Dispatch back-test job
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ env.BOT_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           event-type: backtest-branch
-          client-payload: |
-            { "ref": "${{ github.repository }}@${{ github.ref_name }}", 
-              "branch":  "${{ github.ref_name }}" }
+          client-payload: '{"branch":"${{ steps.branch.outputs.branch }}"}'
