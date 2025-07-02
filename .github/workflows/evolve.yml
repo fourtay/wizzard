@@ -1,63 +1,42 @@
-# ──────────────── choose winners & spawn next gen ────────────────
-  select-and-spawn:
-    needs: fanout-backtests     # wait until every child finished
-    runs-on: ubuntu-latest
-    env:
-      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-      GENERATION: ${{ needs.fanout-backtests.outputs.generation }}
-      TOP_K: "2"
-      METRIC: "sharpeRatio"
-      NUM_CHILDREN: "5"
-      QC_PROJECT_ID: "23708106"
-      QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install deps
-        run: pip install google-cloud-firestore
-
-      - name: Select winners
-        id: winners
-        run: |
-          python wizard/select_winners.py
-          echo "WIN_JSON<<EOF" >> $GITHUB_OUTPUT
-          cat winners.json >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
       - name: Spawn next generation
         run: |
+          # ----- calc NEXT_GEN string -----
           NEXT_GEN=$(python - <<'PY'
-          import os, re, datetime as dt
-          g = os.environ['GENERATION']
-          num = int(re.search(r'gen(\d+)$', g).group(1)) + 1
-          base = re.sub(r'gen\d+$', '', g)
-          print(f"{base}gen{num:02d}")
-          PY)
+import os, re, datetime as dt; g=os.environ['GENERATION']
+n=int(re.search(r'gen(\d+)$',g).group(1))+1
+print(re.sub(r'gen\d+$',f'gen{n:02d}',g))
+PY)
+          echo "🌱  Spawning children for $NEXT_GEN"
 
-          echo "🌱  Creating $NUM_CHILDREN children for $NEXT_GEN"
-          for i in $(seq 1 $NUM_CHILDREN); do
-            CHILD_BRANCH="${NEXT_GEN}-child${i}"
-            git checkout -b "$CHILD_BRANCH"
-            # ⬇️ here you'd call your param mutator script;
-            # for now we just touch a dummy file so the branch is non-empty
-            echo "$RANDOM" > wizard/seed_$i.txt
-            git add wizard/seed_$i.txt
-            git commit -m "seed for $CHILD_BRANCH"
-            git push origin "$CHILD_BRANCH"
-            git checkout -
-          done
+          # ----- read winners array from previous step -----
+          python - <<'PY'
+import json, os, sys, pathlib, subprocess, random
+NUM_CHILD=int(os.getenv("NUM_CHILDREN",5))
+WINNERS=json.loads(os.getenv("WIN_JSON"))
+next_gen=os.getenv("NEXT_GEN")
+mut="wizard/mutate_params.py"
 
-          # finally, fire the back-test dispatcher
-          for i in $(seq 1 $NUM_CHILDREN); do
-            BR="${NEXT_GEN}-child${i}"
-            curl -X POST -H "Accept: application/vnd.github+json" \
-                 -H "Authorization: Bearer ${{ github.token }}" \
-                 https://api.github.com/repos/${{ github.repository }}/dispatches \
-                 -d "{\"event_type\":\"backtest-branch\",\"client_payload\":{\"branch\":\"${BR}\"}}"
-          done
+for w in WINNERS:
+    parent_branch=w["id"].split("--")[0]  # branch name chunk before '--'
+    for i in range(1, NUM_CHILD+1):
+        child_branch=f"{next_gen}-child{i}-{random.randint(0,9999):04d}"
+        subprocess.run(["git","checkout","-b",child_branch,parent_branch],check=True)
+        # make child working dir
+        work="algo"
+        pathlib.Path(work).mkdir(exist_ok=True)
+        # mutate params & stage
+        subprocess.run([sys.executable, mut, parent_branch, work], check=True)
+        git_files=[f"{work}/parameters.json"]
+        subprocess.run(["git","add"]+git_files, check=True)
+        subprocess.run(["git","commit","-m",f'mutate params for {child_branch}'],check=True)
+        subprocess.run(["git","push","-u","origin",child_branch],check=True)
+        # trigger back-test
+        subprocess.run([
+          "gh","api","repos/{owner}/{repo}/dispatches".format(
+             owner="${{ github.repository_owner }}",
+             repo="${{ github.event.repository.name }}"
+          ),
+          "--field","event_type=backtest-branch",
+          "--field",f"client_payload={{\"branch\":\"{child_branch}\"}}"
+        ])
+PY
