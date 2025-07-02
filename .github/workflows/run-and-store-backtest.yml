@@ -1,0 +1,78 @@
+name: run-and-store-backtest
+on:
+  workflow_dispatch:        # run manually from the Actions tab
+
+jobs:
+  backtest-loop:
+    runs-on: ubuntu-latest
+
+    env:
+      # ── REQUIRED SECRETS ───────────────────────────────────────────────
+      GCP_SA_KEY     : ${{ secrets.GCP_SA_KEY }}      # Firestore service-account JSON
+      LEAN_API_TOKEN : ${{ secrets.LEAN_API_TOKEN }}  # QuantConnect API token
+      PROJECT_ID     : "23708106"                     # Your QC project id
+      # ── OPTIONAL TWEAKS ────────────────────────────────────────────────
+      POP_SIZE       : "10"     # how many parameter sets generate_params.py makes
+      GENERATION     : "1"      # evolution cycle stamp
+
+    steps:
+    # ――― 1.  Checkout code ―――――――――――――――――――――――――――――――――――――――――
+    - uses: actions/checkout@v4
+
+    # ――― 2.  Python + CLI deps ――――――――――――――――――――――――――――――――――――
+    - uses: actions/setup-python@v4
+      with: { python-version: "3.10" }
+
+    - name: Install Python deps
+      run: |
+        pip install --quiet lean 'google-cloud-firestore>=2,<3' jq
+
+    # ――― 3.  Generate parameter pool ――――――――――――――――――――――――――――――
+    - name: Generate parameter sets
+      run : |
+        python generate_params.py
+        echo "📄 param_candidates.json:"
+        cat param_candidates.json
+
+    # ――― 4.  Loop + back-test + Firestore upload ――――――――――――――――――――
+    - name: Run back-tests and store results
+      run: |
+        set -e
+        jq -c '.[]' param_candidates.json | while read -r row ; do
+          # ── pull values out of JSON row
+          ID=$(echo "$row" | jq -r '.id')
+          FAST=$(echo "$row" | jq -r '.fast')
+          SLOW=$(echo "$row" | jq -r '.slow')
+          RSI=$(echo  "$row" | jq -r '.rsi')
+
+          echo ""
+          echo "🚀  Back-test $ID — fast=$FAST  slow=$SLOW  rsi=$RSI"
+
+          # file names unique per run
+          OUT_JSON="backtest-$ID.json"
+
+          # 4-A)  run Lean Cloud back-test
+          echo "   ↳ running lean cloud backtest …"
+          lean cloud backtest "$PROJECT_ID" \
+            --name "gen-$ID" \
+            --parameters "fast=$FAST" "slow=$SLOW" "rsi=$RSI" \
+            --output   "$OUT_JSON"
+
+          # 4-B)  grab the backtestId for Firestore doc id
+          BT_ID=$(jq -r '
+              .backtest.backtestId   //      # new Lean CLI
+              .backtest.id           //      # older Lean CLI
+              .backtestId            //      # fallback
+              empty' "$OUT_JSON")
+
+          if [ -z "$BT_ID" ]; then
+            echo "❌  Could not extract backtestId – skipping Firestore upload"
+            continue
+          fi
+          echo "   ↳ Parsed backtestId: $BT_ID"
+
+          # 4-C)  hand data to store_results.py
+          export BACKTEST_ID="$BT_ID"
+          cp "$OUT_JSON" backtest-results.json   # script expects this name
+          python store_results.py
+        done
