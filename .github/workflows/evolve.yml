@@ -1,42 +1,117 @@
-      - name: Spawn next generation
+# =====================================================================
+#  .github/workflows/evolve.yml
+#  Drives the evolutionary loop:
+#    1. Every 20 min (or manual dispatch) create N offspring branches
+#    2. Back-test each child on QuantConnect
+#    3. Store results → Firestore
+#    4. Cull branches that fail the quality gate
+# =====================================================================
+
+name: evolve-algos
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron:  '0,20,40 * * * *'   # every 20 min — tweak as you like
+
+# -------- global knobs ------------------------------------------------
+env:
+  NUM_CHILDREN:       "5"      # offspring per generation
+  QC_PROJECT_ID:      ${{ secrets.QC_PROJECT_ID }}   # set in repo secrets
+  MIN_SHARPE:         "0.20"   # gate threshold
+  MAX_DRAWDOWN:       "0.15"
+# ---------------------------------------------------------------------
+
+jobs:
+# =====================================================================
+# 1️⃣  CREATE-OFFSPRING  – runs on main, spits out a matrix list
+# =====================================================================
+  create-offspring:
+    runs-on: ubuntu-latest
+    outputs:
+      children: ${{ steps.list.outputs.children }}
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with: { python-version: '3.10' }
+
+      - name: Install deps
         run: |
-          # ----- calc NEXT_GEN string -----
-          NEXT_GEN=$(python - <<'PY'
-import os, re, datetime as dt; g=os.environ['GENERATION']
-n=int(re.search(r'gen(\d+)$',g).group(1))+1
-print(re.sub(r'gen\d+$',f'gen{n:02d}',g))
-PY)
-          echo "🌱  Spawning children for $NEXT_GEN"
+          pip install -r requirements.txt
 
-          # ----- read winners array from previous step -----
-          python - <<'PY'
-import json, os, sys, pathlib, subprocess, random
-NUM_CHILD=int(os.getenv("NUM_CHILDREN",5))
-WINNERS=json.loads(os.getenv("WIN_JSON"))
-next_gen=os.getenv("NEXT_GEN")
-mut="wizard/mutate_params.py"
+      - name: Generate offspring strategies
+        run: |
+          python wizard/evolve.py --num "$NUM_CHILDREN"
+          # wizard/evolve.py creates one folder per child under ./offspring
+          ls -1 offspring > children.txt
 
-for w in WINNERS:
-    parent_branch=w["id"].split("--")[0]  # branch name chunk before '--'
-    for i in range(1, NUM_CHILD+1):
-        child_branch=f"{next_gen}-child{i}-{random.randint(0,9999):04d}"
-        subprocess.run(["git","checkout","-b",child_branch,parent_branch],check=True)
-        # make child working dir
-        work="algo"
-        pathlib.Path(work).mkdir(exist_ok=True)
-        # mutate params & stage
-        subprocess.run([sys.executable, mut, parent_branch, work], check=True)
-        git_files=[f"{work}/parameters.json"]
-        subprocess.run(["git","add"]+git_files, check=True)
-        subprocess.run(["git","commit","-m",f'mutate params for {child_branch}'],check=True)
-        subprocess.run(["git","push","-u","origin",child_branch],check=True)
-        # trigger back-test
-        subprocess.run([
-          "gh","api","repos/{owner}/{repo}/dispatches".format(
-             owner="${{ github.repository_owner }}",
-             repo="${{ github.event.repository.name }}"
-          ),
-          "--field","event_type=backtest-branch",
-          "--field",f"client_payload={{\"branch\":\"{child_branch}\"}}"
-        ])
-PY
+      - id: list
+        run: |
+          echo "children=$(jq -R -s -c 'split("\n")[:-1]' children.txt)" >> "$GITHUB_OUTPUT"
+
+# =====================================================================
+# 2️⃣  BACKTEST EACH CHILD (matrix fan-out)
+# =====================================================================
+  backtest:
+    needs: create-offspring
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        child: ${{ fromJson(needs.create-offspring.outputs.children) }}
+
+    env:
+      MIN_SHARPE:   ${{ env.MIN_SHARPE }}
+      MAX_DRAWDOWN: ${{ env.MAX_DRAWDOWN }}
+
+    steps:
+      - name: Checkout child branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.child }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with: { python-version: '3.10' }
+
+      - name: Install CLI + libs
+        run: |
+          pip install lean-cli google-cloud-firestore jq
+
+      # ---------------------------------------------------------------
+      #   2-A  RUN the back-test
+      # ---------------------------------------------------------------
+      - name: Run QuantConnect back-test
+        run: |
+          lean cloud backtest "$QC_PROJECT_ID" --output backtest-results.json
+
+      # ---------------------------------------------------------------
+      #   2-B  STORE results → Firestore
+      # ---------------------------------------------------------------
+      - name: Store results
+        run: python store_results.py
+
+      # ---------------------------------------------------------------
+      #   2-C  QUALITY GATE
+      # ---------------------------------------------------------------
+      - name: Quality gate
+        id: qgate
+        run: |
+          python wizard/quality_gate.py backtest-results.json
+        continue-on-error: true   # let next step see success/fail
+
+      # ---------------------------------------------------------------
+      #   2-D  CULL BAD BRANCH
+      # ---------------------------------------------------------------
+      - name: Cull branch if failed
+        if: steps.qgate.outcome == 'failure'
+        run: |
+          echo "🔪  ${{ matrix.child }} failed gate — deleting"
+          git push origin --delete "${{ matrix.child }}" || true
+          git branch -D "${{ matrix.child }}" || true
