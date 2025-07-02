@@ -1,67 +1,63 @@
-# ──────────────────────────────────────────────────────────
-#  GitHub Actions – generate child algos and push a branch
-# ──────────────────────────────────────────────────────────
-name: evolve-and-branch
-
-on:
-  # run every 30 min
-  schedule:
-    - cron: "*/30 * * * *"
-
-  # manual trigger with optional override
-  workflow_dispatch:
-    inputs:
-      num_children:
-        description: "How many algos to generate"
-        default: "5"
-        required: false
-
-jobs:
-  evolve:
+# ──────────────── choose winners & spawn next gen ────────────────
+  select-and-spawn:
+    needs: fanout-backtests     # wait until every child finished
     runs-on: ubuntu-latest
-
-    # Fallback: use the input value if provided, else 5
     env:
-      NUM_CHILDREN: ${{ github.event.inputs.num_children || '5' }}
-
+      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      GENERATION: ${{ needs.fanout-backtests.outputs.generation }}
+      TOP_K: "2"
+      METRIC: "sharpeRatio"
+      NUM_CHILDREN: "5"
+      QC_PROJECT_ID: "23708106"
+      QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
     steps:
-      # 1 ─ checkout full history so we can create a new branch
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2 ─ python runtime
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      # 3 ─ install any local deps (optional; silent-fail if file absent)
-      - name: Install deps (optional)
+      - name: Install deps
+        run: pip install google-cloud-firestore
+
+      - name: Select winners
+        id: winners
         run: |
-          test -f requirements.txt && pip install --quiet -r requirements.txt || true
+          python wizard/select_winners.py
+          echo "WIN_JSON<<EOF" >> $GITHUB_OUTPUT
+          cat winners.json >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      # 4 ─ generate child algos
-      - name: Run algogen
+      - name: Spawn next generation
         run: |
-          echo "⚙️  Generating $NUM_CHILDREN child algos…"
-          python wizard/algogen.py
+          NEXT_GEN=$(python - <<'PY'
+          import os, re, datetime as dt
+          g = os.environ['GENERATION']
+          num = int(re.search(r'gen(\d+)$', g).group(1)) + 1
+          base = re.sub(r'gen\d+$', '', g)
+          print(f"{base}gen{num:02d}")
+          PY)
 
-      # 5 ─ commit + push to a new branch
-      - name: Commit and push branch
-        id: branch
-        run: |
-          BRANCH="evolve-$(date +'%Y%m%d%H%M%S')"
-          git checkout -b "$BRANCH"
-          git add wizard/out
-          git commit -m "auto: add $NUM_CHILDREN child algos"
-          git push origin "$BRANCH"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "📤  Pushed $BRANCH"
+          echo "🌱  Creating $NUM_CHILDREN children for $NEXT_GEN"
+          for i in $(seq 1 $NUM_CHILDREN); do
+            CHILD_BRANCH="${NEXT_GEN}-child${i}"
+            git checkout -b "$CHILD_BRANCH"
+            # ⬇️ here you'd call your param mutator script;
+            # for now we just touch a dummy file so the branch is non-empty
+            echo "$RANDOM" > wizard/seed_$i.txt
+            git add wizard/seed_$i.txt
+            git commit -m "seed for $CHILD_BRANCH"
+            git push origin "$CHILD_BRANCH"
+            git checkout -
+          done
 
-      # 6 ─ notify the back-test workflow
-      - name: Dispatch back-test job
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          event-type: backtest-branch
-          client-payload: '{"branch":"${{ steps.branch.outputs.branch }}"}'
+          # finally, fire the back-test dispatcher
+          for i in $(seq 1 $NUM_CHILDREN); do
+            BR="${NEXT_GEN}-child${i}"
+            curl -X POST -H "Accept: application/vnd.github+json" \
+                 -H "Authorization: Bearer ${{ github.token }}" \
+                 https://api.github.com/repos/${{ github.repository }}/dispatches \
+                 -d "{\"event_type\":\"backtest-branch\",\"client_payload\":{\"branch\":\"${BR}\"}}"
+          done
