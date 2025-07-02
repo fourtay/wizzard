@@ -1,29 +1,73 @@
-name: evolve-and-commit-strategy
+# .github/workflows/evolve.yml
+name: evolve-and-backtest
+# ────────────────────────────────────────────────────────────
+# What it does
+#   1. Every 10 min (or when you click “Run workflow”) …
+#   2. runs wizard/algogen.py  → makes NUM_CHILDREN *.cs files
+#   3. commits those children on a throw-away branch
+#   4. calls the existing run-and-store-backtest job
+#      (same steps you’ve already wired to Firestore / Looker)
+# ────────────────────────────────────────────────────────────
 on:
+  workflow_dispatch:        # manual button in the UI
   schedule:
-    # every 10 minutes
-    - cron: "*/10 * * * *"
-  workflow_dispatch:   # lets you trigger manually too
+    - cron: '*/10 * * * *'  # every 10 min — change if that’s too chatty
 
 jobs:
   evolve:
     runs-on: ubuntu-latest
+
+    # • Lean API & GCP creds are already in your repo secrets
+    # • BOT_TOKEN must be a classic PAT with “repo” scope so the
+    #   workflow can push a branch (you created this earlier).
     env:
-      GH_PAT: ${{ secrets.GH_PAT }}   # <-- create this repo secret
+      LEAN_API_TOKEN:  ${{ secrets.LEAN_API_TOKEN }}
+      GCP_SA_KEY:      ${{ secrets.GCP_SA_KEY }}
+      BOT_TOKEN:       ${{ secrets.BOT_TOKEN }}
+      PYTHONPATH:      .
+
     steps:
       - name: 📥  Checkout repo
         uses: actions/checkout@v4
         with:
-          token: ${{ env.GH_PAT }}     # so later steps can push
+          fetch-depth: 0      # we need full history for branching
 
-      - name: 🐍  Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-
-      - name: 📦  Install deps
-        run: pip install -r requirements.txt
-
-      - name: 🤖  Generate & commit next strategy
+      - name: 🐍  Install deps
         run: |
-          python algorithm_generator.py
+          pip install -r requirements.txt
+          pip install lean==2.* fire  # lean CLI + misc
+
+      - name: 🧬  Generate child algos
+        run: python wizard/algogen.py
+
+      - name: 📦  Commit & push the children
+        env:
+          GIT_AUTHOR_NAME:  auto-bot
+          GIT_AUTHOR_EMAIL: bot@example.com
+          GIT_COMMITTER_NAME:  auto-bot
+          GIT_COMMITTER_EMAIL: bot@example.com
+          GITHUB_TOKEN:   ${{ env.BOT_TOKEN }}
+        run: |
+          ts=$(date +'%Y%m%d-%H%M%S')
+          branch="evolve-$ts"
+          git checkout -b "$branch"
+          git add wizard/out/*.cs
+          if git diff --cached --quiet; then
+              echo "No new children generated – aborting."; exit 0
+          fi
+          git commit -m "evolve: add ${{ env.NUM_CHILDREN:-5 }} children ($ts)"
+          git push -u origin "$branch"
+
+      # ------------------------------------------------------------------
+      # Kick off the **existing** back-test workflow against that branch.
+      #    We simply call the same composite action you’ve already set up
+      #    (run-and-store-backtest.yml) by dispatching an event to it.
+      # ------------------------------------------------------------------
+      - name: 🚀  Trigger back-test job on the new branch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ env.BOT_TOKEN }}
+          event-type: backtest-branch
+          client-payload: |
+            { "ref": "${{ github.repository }}@${{ github.ref_name }}", 
+              "branch":  "${{ github.ref_name }}" }
