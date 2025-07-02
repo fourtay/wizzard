@@ -1,46 +1,46 @@
-# wizard/select_survivors.py
+#!/usr/bin/env python3
 """
-Pick the best Sharpe-ratio children from Firestore and write them into
-parents.txt so the next generation knows who to mutate.
+Load every results.json, compute Sharpe, keep top NUM_SURVIVORS,
+write their folder names into parents.txt (one per line).
+Also push summary stats to Firestore for Looker.
 """
-import os, pathlib, sys, tempfile
+import json, os, pathlib, operator
 from google.cloud import firestore
 
-COLLECTION      = os.getenv("BACKTEST_COLLECTION", "backtest_results")
-NUM_SURVIVORS   = int(os.getenv("NUM_SURVIVORS", "2"))
+NUM_SURVIVORS = int(os.getenv("NUM_SURVIVORS", "2"))
+COLLECTION    = os.getenv("BACKTEST_COLLECTION", "backtest_results")
+GCP_SA_KEY    = os.environ["GCP_SA_KEY"]
 
-# ---- Firestore auth (reuse the existing secret) ----
-with tempfile.NamedTemporaryFile("w", delete=False) as f:
-    f.write(os.environ["GCP_SA_KEY"])
-    cred_path = f.name
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+# Firestore auth
+open("gcp_key.json", "w").write(GCP_SA_KEY)
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
 db = firestore.Client()
-print("🔑  Firestore authenticated")
 
-# ---- Pull recent back-tests ----
-docs = (db.collection(COLLECTION)
-          .order_by("createdAt", direction=firestore.Query.DESCENDING)
-          .stream())
+ROOT = pathlib.Path(__file__).parent / "children"
+scores = []
 
-candidates = []
-for d in docs:
-    data   = d.to_dict()
-    stats  = data.get("statistics", {})
-    sharpe = float(stats.get("sharpeRatio") or 0)
-    path   = data.get("algoPath")           # we saved this earlier
-    if path:
-        candidates.append((sharpe, path))
-    if len(candidates) > 100:               # look at most recent 100
-        break
+for child in ROOT.iterdir():
+    fn = child / "results.json"
+    if not fn.exists():
+        continue
+    data = json.loads(fn.read_text())
+    stats = data["backtest"]["portfolioStatistics"]
+    sharpe = float(stats["sharpeRatio"])
+    scores.append((child.name, sharpe, stats))
 
-if not candidates:
-    sys.exit("❌  No back-test docs found")
+# pick winners
+scores.sort(key=operator.itemgetter(1), reverse=True)
+survivors   = scores[:NUM_SURVIVORS]
+with open("parents.txt", "w") as f:
+    f.writelines(name + "\n" for name, _, _ in survivors)
+print("🏆  survivors:", [s[0] for s in survivors])
 
-candidates.sort(reverse=True)               # best Sharpe first
-survivors = [p for _, p in candidates[:NUM_SURVIVORS]]
-print("🏆  Survivors picked:", survivors)
-
-# ---- Write the survivor list ----
-path = pathlib.Path("parents.txt")
-path.write_text("\n".join(survivors) + "\n")
-print("📝  parents.txt updated")
+# upload each to Firestore
+for name, sharpe, stats in survivors:
+    doc = {
+        "child": name,
+        "sharpe": sharpe,
+        "stats": stats
+    }
+    db.collection(COLLECTION).add(doc)
+    print(f"☁️  pushed {name} to Firestore")
