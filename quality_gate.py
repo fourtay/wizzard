@@ -1,38 +1,62 @@
 #!/usr/bin/env python3
 """
-Exit 0 (success) if metrics pass the gate; otherwise exit 1
-so the workflow can decide to delete the branch.
+wizard/quality_gate.py
+-------------------------------------------------------
+Evaluates back-test results dumped by QuantConnect.
+
+Invoked by the workflow as:
+    python wizard/quality_gate.py backtest-results.json
+• Exits 0  → child passes
+• Exits 1  → child fails (workflow step shows “failure” and culls branch)
+-------------------------------------------------------
 """
 
-import json, sys, os, math
+import json, sys, pathlib, math, textwrap, os
 
-FILE = sys.argv[1] if len(sys.argv) == 2 else "backtest-results.json"
-
-# -------- thresholds (tune as you wish) --------
 MIN_SHARPE   = float(os.getenv("MIN_SHARPE",   "0.20"))
 MAX_DRAWDOWN = float(os.getenv("MAX_DRAWDOWN", "0.15"))
-# -----------------------------------------------
 
-try:
-    data = json.load(open(FILE))
-except Exception as e:
-    print(f"❌  Cannot open {FILE}: {e}")
-    sys.exit(1)
+def load(path: str) -> dict:
+    try:
+        with open(path, "r") as fh:
+            return json.load(fh)
+    except Exception as exc:
+        sys.stderr.write(f"‼️  Could not read {path}: {exc}\n")
+        sys.exit(1)
 
-stats = data.get("statistics") or data.get("results", {}).get("statistics")
-if not stats:
-    print("❌  stats block missing")
-    sys.exit(1)
+def extract(stats: dict[str, str], key: str, default: float = math.nan) -> float:
+    try:
+        return float(stats[key])
+    except (KeyError, ValueError):
+        return default
 
-sharpe   = float(stats.get("sharpeRatio")           or 0)
-drawdown = float(stats.get("drawdown")              or 0)
-print(f"ℹ️  Sharpe={sharpe:.3f}  DrawDown={drawdown:.3f}")
+def run(path: str) -> None:
+    data   = load(path)
+    stats  = data.get("statistics") or data.get("results", {}).get("statistics") or {}
+    name   = data.get("name", "unknown-run")
 
-if sharpe < MIN_SHARPE:
-    print(f"❌  Sharpe {sharpe:.2f} < {MIN_SHARPE}")
-    sys.exit(1)
-if drawdown > MAX_DRAWDOWN:
-    print(f"❌  Drawdown {drawdown:.2f} > {MAX_DRAWDOWN}")
-    sys.exit(1)
+    sharpe     = extract(stats, "sharpeRatio")
+    drawdown   = extract(stats, "drawdown")
 
-print("✅  PASSED quality gate")
+    # Fail-safe: if numbers are missing treat as fail
+    if math.isnan(sharpe) or math.isnan(drawdown):
+        sys.stderr.write("‼️  Missing sharpeRatio or drawdown—failing gate.\n")
+        sys.exit(1)
+
+    ok = (sharpe >= MIN_SHARPE) and (drawdown <= MAX_DRAWDOWN)
+
+    print(textwrap.dedent(f"""
+        ╔══════════════════════════════════════════════╗
+        ║   Quality Gate for:  {name}                  ║
+        ║   Sharpe   : {sharpe:6.3f} (>= {MIN_SHARPE})          ║
+        ║   Drawdown : {drawdown:6.3f} (<= {MAX_DRAWDOWN})       ║
+        ╚══════════════════════════════════════════════╝
+    """).strip())
+
+    sys.exit(0 if ok else 1)
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: quality_gate.py <backtest-results.json>", file=sys.stderr)
+        sys.exit(1)
+    run(sys.argv[1])
