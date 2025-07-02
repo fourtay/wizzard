@@ -1,117 +1,80 @@
-# =====================================================================
-#  .github/workflows/evolve.yml
-#  Drives the evolutionary loop:
-#    1. Every 20 min (or manual dispatch) create N offspring branches
-#    2. Back-test each child on QuantConnect
-#    3. Store results → Firestore
-#    4. Cull branches that fail the quality gate
-# =====================================================================
+# .github/workflows/evolve.yml
+name: evolve
 
-name: evolve-algos
-
+# ── When to run ────────────────────────────────────────────────────────────────
 on:
-  workflow_dispatch:
+  # every 30 min
   schedule:
-    - cron:  '0,20,40 * * * *'   # every 20 min — tweak as you like
-
-# -------- global knobs ------------------------------------------------
-env:
-  NUM_CHILDREN:       "5"      # offspring per generation
-  QC_PROJECT_ID:      ${{ secrets.QC_PROJECT_ID }}   # set in repo secrets
-  MIN_SHARPE:         "0.20"   # gate threshold
-  MAX_DRAWDOWN:       "0.15"
-# ---------------------------------------------------------------------
+    - cron: "*/30 * * * *"
+  # manual button in the Actions tab
+  workflow_dispatch:
 
 jobs:
-# =====================================================================
-# 1️⃣  CREATE-OFFSPRING  – runs on main, spits out a matrix list
-# =====================================================================
-  create-offspring:
-    runs-on: ubuntu-latest
-    outputs:
-      children: ${{ steps.list.outputs.children }}
-    steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with: { python-version: '3.10' }
-
-      - name: Install deps
-        run: |
-          pip install -r requirements.txt
-
-      - name: Generate offspring strategies
-        run: |
-          python wizard/evolve.py --num "$NUM_CHILDREN"
-          # wizard/evolve.py creates one folder per child under ./offspring
-          ls -1 offspring > children.txt
-
-      - id: list
-        run: |
-          echo "children=$(jq -R -s -c 'split("\n")[:-1]' children.txt)" >> "$GITHUB_OUTPUT"
-
-# =====================================================================
-# 2️⃣  BACKTEST EACH CHILD (matrix fan-out)
-# =====================================================================
-  backtest:
-    needs: create-offspring
+  evolve:
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        child: ${{ fromJson(needs.create-offspring.outputs.children) }}
-
+    # ── Global env vars (tweak freely) ────────────────────────────────────────
     env:
-      MIN_SHARPE:   ${{ env.MIN_SHARPE }}
-      MAX_DRAWDOWN: ${{ env.MAX_DRAWDOWN }}
+      NUM_CHILDREN:   "5"                   # kids per generation
+      NUM_SURVIVORS:  "2"                   # winners that become parents
+      BACKTEST_COLLECTION: "backtest_results"
+
+      # required secrets – already added in GitHub → Settings → Secrets
+      QC_API_TOKEN:   ${{ secrets.QC_API_TOKEN }}
+      GCP_SA_KEY:     ${{ secrets.GCP_SA_KEY }}
+
+    # every run command is bash -e  (fail fast on errors)
+    defaults:
+      run:
+        shell: bash -e {0}
 
     steps:
-      - name: Checkout child branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.child }}
-          fetch-depth: 0
+    # ── 0. checkout repo ──────────────────────────────────────────────────────
+    - name: Checkout repo
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with: { python-version: '3.10' }
+    # ── 1. Python toolchain ───────────────────────────────────────────────────
+    - name: Setup Python 3.10
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
 
-      - name: Install CLI + libs
-        run: |
-          pip install lean-cli google-cloud-firestore jq
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      # ---------------------------------------------------------------
-      #   2-A  RUN the back-test
-      # ---------------------------------------------------------------
-      - name: Run QuantConnect back-test
-        run: |
-          lean cloud backtest "$QC_PROJECT_ID" --output backtest-results.json
+    # ── 2. Generate fresh children (wizard/algo_gen.py) ───────────────────────
+    - name: Generate children 🐣
+      run: |
+        python wizard/algo_gen.py --num "$NUM_CHILDREN"
 
-      # ---------------------------------------------------------------
-      #   2-B  STORE results → Firestore
-      # ---------------------------------------------------------------
-      - name: Store results
-        run: python store_results.py
+    - name: Commit children 💾
+      run: |
+        git config user.name  "evolve-bot"
+        git config user.email "evolve-bot@users.noreply.github.com"
+        git add wizard/children/
+        git commit -m "ci: add children for new generation [skip ci]" || echo "Nothing to commit"
+        git push
 
-      # ---------------------------------------------------------------
-      #   2-C  QUALITY GATE
-      # ---------------------------------------------------------------
-      - name: Quality gate
-        id: qgate
-        run: |
-          python wizard/quality_gate.py backtest-results.json
-        continue-on-error: true   # let next step see success/fail
+    # ── 3. Kick off all back-tests in QuantConnect Cloud ──────────────────────
+    - name: Launch back-tests 🚀
+      run: |
+        python wizard/run_backtests.py
 
-      # ---------------------------------------------------------------
-      #   2-D  CULL BAD BRANCH
-      # ---------------------------------------------------------------
-      - name: Cull branch if failed
-        if: steps.qgate.outcome == 'failure'
-        run: |
-          echo "🔪  ${{ matrix.child }} failed gate — deleting"
-          git push origin --delete "${{ matrix.child }}" || true
-          git branch -D "${{ matrix.child }}" || true
+    - name: Wait for back-tests ⏳
+      run: |
+        python wizard/wait_backtests.py
+
+    # ── 4. Pick the best performers (new) ─────────────────────────────────────
+    - name: Select survivors 📊
+      run: |
+        python wizard/select_survivors.py
+
+    - name: Commit survivor list 🆕
+      run: |
+        git config user.name  "evolve-bot"
+        git config user.email "evolve-bot@users.noreply.github.com"
+        git add parents.txt
+        git commit -m "ci: update parents.txt with survivors [skip ci]" || echo "Nothing new to commit"
+        git push
