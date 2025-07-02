@@ -1,80 +1,41 @@
-# run_backtest.py (Definitive Final Version)
-import os
-import subprocess
-import sys
+#!/usr/bin/env python3
+"""
+For every folder in wizard/children/, start a cloud back-test and
+store QC 'backtestId' in backtests.json so we can poll later.
 
-# --- Settings ---
-QC_PROJECT_NAME = "23708106"
-WORKSPACE_DIR = "lean_workspace"
-# The output path must be inside the project folder that gets created
-OUTPUT_FILE_PATH = f"{WORKSPACE_DIR}/{QC_PROJECT_NAME}/backtest-results.json"
+Requires env var:
+  • QC_API_TOKEN
+"""
+import os, json, subprocess, pathlib
 
-# --- Get Credentials from GitHub Secrets ---
-try:
-    QC_USER_ID = os.environ["QC_USER_ID"]
-    QC_API_TOKEN = os.environ["QC_API_TOKEN"]
-except KeyError:
-    print("ERROR: Make sure QC_USER_ID and QC_API_TOKEN are set.")
-    sys.exit(1)
+QC_TOKEN = os.getenv("QC_API_TOKEN")
+assert QC_TOKEN, "QC_API_TOKEN not set"
 
-# --- 1. Create and move into a clean workspace directory ---
-print(f"Creating clean workspace at ./{WORKSPACE_DIR}")
-os.makedirs(WORKSPACE_DIR, exist_ok=True)
-# All subsequent commands will run from inside this directory
-os.chdir(WORKSPACE_DIR)
+CHILD_DIR = pathlib.Path(__file__).parent / "children"
+OUT_F     = pathlib.Path(__file__).parent / "backtests.json"
+PROJECT_ID = "23708106"        # ← your QC project ID
 
-# --- 2. Log in to LEAN CLI ---
-print("Logging into LEAN CLI...")
-login_command = ["lean", "login", "--user-id", QC_USER_ID, "--api-token", QC_API_TOKEN]
-subprocess.run(login_command, check=True, capture_output=True, text=True)
-print("Successfully logged in.")
+records = {}
+for child in CHILD_DIR.iterdir():
+    if not child.is_dir():
+        continue
+    print(f"🚀  launching {child.name}")
+    cmd = [
+        "lean", "cloud", "backtest", str(PROJECT_ID),
+        "--push", str(child),
+        "--name", child.name,
+        "--wait", "--output", str(child / "backtest.json"),
+        "--json", "--token", QC_TOKEN,
+    ]
+    res = subprocess.run(cmd, text=True, capture_output=True)
+    if res.returncode != 0:
+        print("❌  QC error:", res.stderr.strip())
+        continue
+    # lean prints json when --json; parse id
+    payload = json.loads(res.stdout)
+    bt_id = payload["backtestId"]
+    records[child.name] = bt_id
 
-# --- 3. Initialize the LEAN Workspace Non-Interactively ---
-# This is the definitive fix. We provide the answers to the prompts directly.
-# --language python : Answers "What should the default language be?"
-# --no-samples    : Prevents the large sample data download.
-print("Initializing LEAN workspace non-interactively...")
-init_command = ["lean", "init", "--language", "python", "--no-samples"]
-try:
-    subprocess.run(init_command, check=True, capture_output=True, text=True)
-    print("Successfully initialized workspace.")
-except subprocess.CalledProcessError as e:
-    print(f"ERROR: 'lean init' failed unexpectedly.")
-    print("Output:", e.stdout)
-    print("Error Output:", e.stderr)
-    sys.exit(1)
-
-
-# --- 4. Pull Cloud Project into the Workspace ---
-print(f"Pulling cloud project '{QC_PROJECT_NAME}'...")
-pull_command = ["lean", "cloud", "pull", "--project", QC_PROJECT_NAME]
-try:
-    subprocess.run(pull_command, check=True, capture_output=True, text=True)
-    print("Successfully pulled project files.")
-except subprocess.CalledProcessError as e:
-    print(f"ERROR: Failed to pull cloud project '{QC_PROJECT_NAME}'.")
-    print("Output:", e.stdout)
-    print("Error Output:", e.stderr)
-    sys.exit(1)
-
-# --- 5. Run the Backtest ---
-print(f"Starting cloud backtest for project '{QC_PROJECT_NAME}'...")
-# The output path needs to be relative to the workspace now
-relative_output_path = f"{QC_PROJECT_NAME}/backtest-results.json"
-backtest_command = [
-    "lean", "backtest",
-    QC_PROJECT_NAME,
-    "--output", relative_output_path,
-    "--detach",
-    "--no-update"
-]
-try:
-    process = subprocess.run(backtest_command, check=True, capture_output=True, text=True)
-    print("Successfully submitted backtest to QuantConnect Cloud.")
-    print("LEAN CLI Output:", process.stdout)
-    print("run_backtest.py finished.")
-except subprocess.CalledProcessError as e:
-    print("ERROR: The 'lean backtest' command failed.")
-    print("Output:", e.stdout)
-    print("Error Output:", e.stderr)
-    sys.exit(1)
+with open(OUT_F, "w") as f:
+    json.dump(records, f, indent=2)
+print(f"💾 wrote {OUT_F}")
