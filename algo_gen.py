@@ -1,73 +1,48 @@
-# wizard/algo_gen.py
+#!/usr/bin/env python3
 """
-Simple parameter-space “genetic” generator for QC algos.
+Create <num> new algorithm folders under wizard/children/.
 
-Assumptions
------------
-* Each algorithm lives in its own sub-folder under `algos/`.
-* Inside every algo folder there is a `params.json` file, e.g.
-      {
-        "ma_short": 10,
-        "ma_long": 50,
-        "stop_loss": 0.02
-      }
-* The trading logic (e.g. `main.py`) imports params.json at run-time,
-  so mutating that file is enough to create a new variant.
+Each child folder contains:
+  • main.py  – a QC Lean algorithm stub with random parameters
+  • config.json – metadata we keep to trace the parameters used
 """
+import argparse, os, json, random, shutil, datetime, pathlib
 
-from __future__ import annotations
-import json, random, shutil, time, pathlib, hashlib
-from typing import Dict, List
+CHILD_DIR = pathlib.Path(__file__).parent / "children"
+TEMPLATE   = pathlib.Path(__file__).parent / "template_algo.py"   # ← plain algo stub
 
-ALGOS_DIR = pathlib.Path("algos")          # root that holds 1 folder per algo
-PARAM_FILE = "params.json"                 # file we actually mutate
+def mutate():
+    """Return a dict of randomly-mutated hyper-parameters."""
+    return {
+        "symbol": random.choice(["SPY", "QQQ", "TLT", "IWM"]),
+        "sma_fast": random.randint(5, 30),
+        "sma_slow": random.randint(40, 200),
+        "rsi_period": random.randint(7, 21),
+        "rsi_buy": random.randint(25, 40),
+        "rsi_sell": random.randint(60, 75),
+    }
 
+def write_child(idx: int, params: dict):
+    ts   = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    name = f"child_{ts}_{idx}"
+    folder = CHILD_DIR / name
+    folder.mkdir(parents=True, exist_ok=True)
 
-def _rand_key() -> str:
-    """Return 8-char hash for unique folder names."""
-    return hashlib.sha1(str(time.time_ns()).encode()).hexdigest()[:8]
+    # copy template algo
+    shutil.copy(TEMPLATE, folder / "main.py")
 
+    # embed params in config.json
+    with open(folder / "config.json", "w") as f:
+        json.dump(params, f, indent=2)
 
-def mutate(parent_params: Dict[str, float], std: float) -> Dict[str, float]:
-    """Gaussian-jitter each numeric parameter by `std`."""
-    child = {}
-    for k, v in parent_params.items():
-        if isinstance(v, (int, float)):
-            jitter = random.gauss(0, std * abs(v or 1))
-            child[k] = max(0, v + jitter)  # keep positive
-        else:
-            child[k] = v                   # non-numeric untouched
-    return child
+    print(f"📦  created {folder}")
+    return folder
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num", type=int, required=True)
+    args = parser.parse_args()
 
-def generate_children(
-    parent_algo: pathlib.Path,
-    num_children: int = 5,
-    mutation_std: float = 0.1,
-) -> List[pathlib.Path]:
-    """
-    Create `num_children` mutated copies of `parent_algo`.
-
-    Returns a list of new child-folder paths.
-    """
-    assert parent_algo.is_dir(), f"{parent_algo} not found"
-
-    parent_params_path = parent_algo / PARAM_FILE
-    with parent_params_path.open() as f:
-        parent_params = json.load(f)
-
-    children_paths: List[pathlib.Path] = []
-
-    for _ in range(num_children):
-        key     = _rand_key()
-        child   = ALGOS_DIR / f"{parent_algo.name}_{key}"
-        shutil.copytree(parent_algo, child)
-
-        # write mutated param file
-        new_params = mutate(parent_params, mutation_std)
-        with (child / PARAM_FILE).open("w") as f:
-            json.dump(new_params, f, indent=2)
-
-        children_paths.append(child)
-
-    return children_paths
+    CHILD_DIR.mkdir(exist_ok=True)
+    for i in range(args.num):
+        write_child(i + 1, mutate())
