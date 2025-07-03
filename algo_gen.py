@@ -1,48 +1,66 @@
-#!/usr/bin/env python3
 """
-Create <num> new algorithm folders under wizard/children/.
+algo_gen.py
+-----------
+Very-first, bare-bones *algorithm generator*.
 
-Each child folder contains:
-  • main.py  – a QC Lean algorithm stub with random parameters
-  • config.json – metadata we keep to trace the parameters used
+• Every call produces a new QCAlgorithm subclass with:
+    – A randomly chosen ticker from a small universe
+    – A random daily SMA crossover (fast / slow windows)
+• The script writes the code into
+      strategies/<uuid4>.py
+  and prints that filename; evolve.py picks it up.
+
+Later we’ll:
+  • Add genetic / bayesian search
+  • Inject constraints (asset class, leverage, etc.)
+  • Use past winners as parents
 """
-import argparse, os, json, random, shutil, datetime, pathlib
 
-CHILD_DIR = pathlib.Path(__file__).parent / "children"
-TEMPLATE   = pathlib.Path(__file__).parent / "template_algo.py"   # ← plain algo stub
+import random, uuid, pathlib, json, textwrap, os, datetime
 
-def mutate():
-    """Return a dict of randomly-mutated hyper-parameters."""
-    return {
-        "symbol": random.choice(["SPY", "QQQ", "TLT", "IWM"]),
-        "sma_fast": random.randint(5, 30),
-        "sma_slow": random.randint(40, 200),
-        "rsi_period": random.randint(7, 21),
-        "rsi_buy": random.randint(25, 40),
-        "rsi_sell": random.randint(60, 75),
+UNIVERSE = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
+OUT_DIR  = pathlib.Path(__file__).with_suffix("").parent / "strategies"
+OUT_DIR.mkdir(exist_ok=True)
+
+def generate():
+    sym   = random.choice(UNIVERSE)
+    fast  = random.randint(5, 30)
+    slow  = random.randint(fast + 5, fast + 60)
+    class_name = f"SMA_{sym}_{fast}_{slow}_{uuid.uuid4().hex[:6]}"
+    code = textwrap.dedent(f"""
+        from AlgorithmImports import *
+
+        class {class_name}(QCAlgorithm):
+            def Initialize(self):
+                self.SetStartDate(2017, 1, 1)
+                self.SetEndDate(datetime.utcnow())
+                self.SetCash(100000)
+                self.symbol = self.AddEquity("{sym}", Resolution.Daily).Symbol
+                self.fast = self.SMA(self.symbol, {fast}, Resolution.Daily)
+                self.slow = self.SMA(self.symbol, {slow}, Resolution.Daily)
+                self.previous = None
+
+            def OnData(self, data):
+                if not (self.fast.IsReady and self.slow.IsReady): return
+                if self.previous == self.Time.date(): return
+                self.previous = self.Time.date()
+
+                if self.fast.Current.Value > self.slow.Current.Value and not self.Portfolio[self.symbol].IsLong:
+                    self.SetHoldings(self.symbol, 1)
+                elif self.fast.Current.Value < self.slow.Current.Value and self.Portfolio[self.symbol].IsLong:
+                    self.Liquidate(self.symbol)
+    """)
+    file_path = OUT_DIR / f"{class_name}.py"
+    file_path.write_text(code)
+    meta = {
+        "strategy_file": str(file_path),
+        "symbol": sym,
+        "fast": fast,
+        "slow": slow,
+        "created": datetime.datetime.utcnow().isoformat()
     }
-
-def write_child(idx: int, params: dict):
-    ts   = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    name = f"child_{ts}_{idx}"
-    folder = CHILD_DIR / name
-    folder.mkdir(parents=True, exist_ok=True)
-
-    # copy template algo
-    shutil.copy(TEMPLATE, folder / "main.py")
-
-    # embed params in config.json
-    with open(folder / "config.json", "w") as f:
-        json.dump(params, f, indent=2)
-
-    print(f"📦  created {folder}")
-    return folder
+    print(json.dumps(meta))          # evolve.py consumes stdout
+    return file_path
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--num", type=int, required=True)
-    args = parser.parse_args()
-
-    CHILD_DIR.mkdir(exist_ok=True)
-    for i in range(args.num):
-        write_child(i + 1, mutate())
+    generate()
