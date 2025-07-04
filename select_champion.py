@@ -1,48 +1,53 @@
 #!/usr/bin/env python3
 """
-Select the best child in the last generation and mark it as the champion.
+select_champion.py – pick the best-performing child algo
 """
 
 import os, sys, json, datetime
 from google.cloud import firestore
 
-METRIC = "compoundingAnnualReturn"         # ← change if you prefer
-GEN_WINDOW_MINUTES = 40                    # any doc newer than this is "this gen"
+COLL = "backtest_results"          # Firestore collection
+METRIC = "Net Profit"              # ← change if you prefer Sharpe etc.
 
-def main():
-    db = firestore.Client()
-
-    since = datetime.datetime.utcnow() - datetime.timedelta(minutes=GEN_WINDOW_MINUTES)
-
-    docs = (
-        db.collection("backtest_results")
-          .where("createdAt", ">", since)
-          .stream()
-    )
-
-    best_doc = None
-    best_val = float("-inf")
-
-    for d in docs:
-        stats = d.to_dict().get("statistics", {})
-        val   = float(stats.get(METRIC, "0") or 0)
-        if val > best_val:
-            best_val  = val
-            best_doc  = d
-
-    if not best_doc:
-        print("No docs found in this generation window; exiting 0.")
-        return
-
-    # Mark champion in Firestore
-    best_doc.reference.update({"isChampion": True})
-    print(f"🏆 Champion is {best_doc.id} with {METRIC}={best_val}")
-
-    # write params locally for algo_gen.py
-    params = best_doc.to_dict().get("params", {})
-    with open("champion.json", "w") as f:
-        json.dump(params, f, indent=2)
-
-if __name__ == "__main__":
+#
+# 0. secrets
+#
+try:
+    with open("gcp_key.json", "w") as fh:
+        fh.write(os.environ["GCP_SA_KEY"])
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
-    main()
+except KeyError:
+    print("missing GCP_SA_KEY"); sys.exit(1)
+
+db = firestore.Client()
+
+#
+# 1. read latestgeneration’s docs
+#
+today = datetime.date.today()
+docs = list(db.collection(COLL).where(
+            "createdAt", ">=", datetime.datetime(today.year, today.month, today.day)
+        ).stream())
+
+if not docs:
+    print("no today docs – abort"); sys.exit(0)
+
+#
+# 2. pick champion
+#
+def score(d):      # higher is better
+    return float(d["statistics"].get(METRIC, 0))
+
+champ = max(docs, key=lambda d: score(d.to_dict()))
+cdata = champ.to_dict()
+
+print("🏆  champion", champ.id, score(cdata))
+
+#
+# 3. write artefact
+#
+with open("champion.json", "w") as fh:
+    json.dump(cdata, fh, indent=2)
+# also overwrite parent seed
+with open("parent_algo.json", "w") as fh:
+    json.dump(cdata["algo"], fh, indent=2)     # assumes you stored algo params under 'algo'
