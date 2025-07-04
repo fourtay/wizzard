@@ -1,73 +1,110 @@
 #!/usr/bin/env python3
 """
-Push a single Lean back-test JSON file (backtest-results*.json) to Firestore.
+store_results.py
+----------------
+Reads Lean’s back-test JSON (backtest-results.json) and pushes the key
+statistics + charts to Google Firestore.
 
-Handles both old and new QC schemas:
-  • {"results": {"statistics": …}}
-  • {"backtest": {"statistics": …}}
+• Expects the following env vars (already set by the workflow):
+    - BACKTEST_ID   – document id to use in the collection
+    - GCP_SA_KEY    – service-account JSON (base64-safe string)
+
+• Firestore collection: backtest_results
 """
 
-import json, os, sys, glob
-from datetime import datetime
+import json
+import os
+import sys
+from pathlib import Path
+
 from google.cloud import firestore
 
-# ───────────────────────────────────────────
-# 1. Locate newest back-test JSON
-# ───────────────────────────────────────────
-candidates = sorted(glob.glob("backtest-results*.json"), key=os.path.getmtime)
-if not candidates:
-    print("❌  No backtest-results*.json found")
+# ── Settings ──────────────────────────────────────────────────────────────
+RESULTS_FILE_PATH = Path("backtest-results.json")
+
+# ── Grab secrets ──────────────────────────────────────────────────────────
+try:
+    GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
+    BACKTEST_ID = os.environ["BACKTEST_ID"]
+except KeyError as missing:
+    print(f"❌  Required env var not set: {missing.args[0]}")
     sys.exit(1)
 
-LATEST = candidates[-1]
-print(f"📖  Using {LATEST}")
+# ── Firestore auth ────────────────────────────────────────────────────────
+try:
+    with open("gcp_key.json", "w") as fh:
+        fh.write(GCP_SA_KEY_JSON)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
+    db = firestore.Client()
+    print("✅  Firestore ready")
+except Exception as exc:
+    print(f"❌  Firestore auth failed: {exc}")
+    sys.exit(1)
 
-with open(LATEST, "r") as f:
-    data = json.load(f)
+# ── Load JSON ─────────────────────────────────────────────────────────────
+print("📖  Parsing backtest JSON …")
+if not RESULTS_FILE_PATH.exists():
+    print(f"❌  {RESULTS_FILE_PATH} not found")
+    sys.exit(1)
 
-# ───────────────────────────────────────────
-# 2. Extract statistics & charts (works for both schemas)
-# ───────────────────────────────────────────
-def extract(d: dict):
-    if "results" in d:      # old CLI
-        return d["results"].get("statistics"), d["results"].get("charts", {})
-    if "backtest" in d:     # new CLI
-        b = d["backtest"]
-        return b.get("statistics"), b.get("charts", {})
-    return None, None
+try:
+    results_json = json.loads(RESULTS_FILE_PATH.read_text())
+except json.JSONDecodeError as exc:
+    print(f"❌  Invalid JSON: {exc}")
+    sys.exit(1)
 
-statistics, charts = extract(data)
+# ── Helpers to locate statistics / charts anywhere in the tree ───────────
+def find_stats(node: dict):
+    """Depth-first search for the statistics dict, no matter where Lean put it."""
+    if not isinstance(node, dict):
+        return None
+    # Heuristic: a real stats block contains several well-known keys
+    REQUIRED_KEYS = {"Total Fees", "Net Profit", "Sharpe Ratio"}
+    if REQUIRED_KEYS.intersection(node.keys()) and len(node) > 5:
+        return node
+    for v in node.values():
+        if isinstance(v, dict):
+            found = find_stats(v)
+            if found:
+                return found
+    return None
+
+def find_charts(node: dict):
+    if not isinstance(node, dict):
+        return None
+    if "charts" in node and isinstance(node["charts"], dict):
+        return node["charts"]
+    for v in node.values():
+        if isinstance(v, dict):
+            found = find_charts(v)
+            if found is not None:
+                return found
+    return {}
+
+statistics = find_stats(results_json)
+charts      = find_charts(results_json) or {}
+
 if not statistics:
-    print("❌  statistics block missing – aborting")
-    print(f"Top-level keys: {list(data.keys())}")
+    print("❌  statistics block missing")
+    print("Top-level keys:", list(results_json.keys()))
     sys.exit(1)
 
-# ───────────────────────────────────────────
-# 3. Firestore – connect
-# ───────────────────────────────────────────
-GCP_SA_KEY = os.getenv("GCP_SA_KEY")
-BACKTEST_ID = os.getenv("BACKTEST_ID")  # set in evolve.yml
+# Back-test name, if present
+name = (
+    results_json.get("name")
+    or results_json.get("backtest", {}).get("name")
+    or "Unnamed Backtest"
+)
 
-if not (GCP_SA_KEY and BACKTEST_ID):
-    print("❌  GCP_SA_KEY or BACKTEST_ID env var missing")
-    sys.exit(1)
-
-with open("gcp_key.json", "w") as f:
-    f.write(GCP_SA_KEY)
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
-
-db = firestore.Client()
-print("✅  Firestore ready")
-
-# ───────────────────────────────────────────
-# 4. Upload
-# ───────────────────────────────────────────
-doc = {
-    "name": data.get("name", "Unnamed Backtest"),
+# ── Upload ────────────────────────────────────────────────────────────────
+payload = {
+    "name": name,
     "createdAt": firestore.SERVER_TIMESTAMP,
     "statistics": statistics,
     "charts": charts,
 }
 
-db.collection("backtest_results").document(BACKTEST_ID).set(doc)
-print(f"✨  Uploaded stats for {BACKTEST_ID}")
+print(f"⬆️  Uploading document {BACKTEST_ID} …")
+doc_ref = db.collection("backtest_results").document(BACKTEST_ID)
+doc_ref.set(payload)
+print("✅  Successfully uploaded backtest results to Firestore!")
