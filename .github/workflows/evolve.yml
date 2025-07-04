@@ -2,7 +2,6 @@ name: evolve
 on:
   workflow_dispatch:
   schedule:
-    # every 12 h
     - cron: "0 */12 * * *"
 
 env:
@@ -15,36 +14,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.10
-      - name: Make kids
-        run: |
-          python tools/algo_gen.py
-      - name: Persist children
-        uses: actions/upload-artifact@v4
-        with:
-          name: children
-          path: children/
+      - uses: actions/setup-python@v5
+        with: {python-version: 3.10}
+      - run: python tools/algo_gen.py
+      - uses: actions/upload-artifact@v4
+        with: {name: children, path: children/}
 
   backtest:
     needs: generate-children
     runs-on: ubuntu-latest
     strategy:
-      matrix:
-        child: [0,1,2,3,4]   # matches NUM_CHILDREN
+      matrix: {child: [0,1,2,3,4]}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: {name: children}
       - name: Run Lean cloud back-test
-        env:
-          LEAN_CLOUD_TOKEN: ${{ env.QC_TOKEN }}
+        env: {LEAN_CLOUD_TOKEN: ${{ env.QC_TOKEN }}}
         run: |
           CHILD_FILE="children/child_${{ matrix.child }}.json"
-          echo "▶︎ Testing $CHILD_FILE"
-          # compile & back-test; write backtest-results.json
           lean cloud backtest "${{ env.LEAN_PROJECT_ID }}" \
                --inputs "$CHILD_FILE" \
                --output backtest-results.json
@@ -56,14 +44,11 @@ jobs:
           export BACKTEST_ID
           python tools/store_results.py
       - name: Upload runStart marker
-        if: matrix.child == 0
-        run: |
-          date --iso-8601=seconds > run_start.txt
+        if: matrix.child == '0'
+        run: date --iso-8601=seconds > run_start.txt
       - uses: actions/upload-artifact@v4
-        if: matrix.child == 0
-        with:
-          name: run-start
-          path: run_start.txt
+        if: matrix.child == '0'
+        with: {name: run-start, path: run_start.txt}
 
   select-champion:
     needs: backtest
@@ -78,16 +63,27 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           RUN_START: $(cat run-start/run_start.txt)
-        run: |
-          python tools/score_population.py
-      - name: Commit new champion if updated
+        run: python tools/score_population.py
+      - name: Commit new champion
         run: |
           git config --global user.email "bot@github"
           git config --global user.name  "Auto Evolve Bot"
           if git diff --quiet champion.json; then
             echo "No new champion"
           else
-            git add champion.json
-            git commit -m "ci: promote new champion"
-            git push
+            git add champion.json && git commit -m "ci: promote new champion" && git push
           fi
+
+  prune-firestore:           # <-- NEW JOB
+    needs: select-champion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: 3.10}
+      - name: Prune old docs
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          KEEP_DAYS: 14
+          KEEP_LATEST: 200
+        run: python tools/prune_firestore.py
