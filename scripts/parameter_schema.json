@@ -1,0 +1,9 @@
+{
+  "lookback_days":      { "type": "int",    "min": 5,   "max": 120 },
+  "sma_fast":           { "type": "int",    "min": 5,   "max": 50  },
+  "sma_slow":           { "type": "int",    "min": 20,  "max": 200 },
+  "rsi_period":         { "type": "int",    "min": 5,   "max": 50  },
+  "rsi_buy_threshold":  { "type": "float",  "min": 20,  "max": 40  },
+  "rsi_sell_threshold": { "type": "float",  "min": 60,  "max": 80  },
+  "position_size_pct":  { "type": "float",  "min": 0.05,"max": 0.30 }
+}
