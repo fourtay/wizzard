@@ -1,66 +1,83 @@
+# tools/algogen/algo_gen.py
 """
-algo_gen.py
------------
-Very-first, bare-bones *algorithm generator*.
-
-• Every call produces a new QCAlgorithm subclass with:
-    – A randomly chosen ticker from a small universe
-    – A random daily SMA crossover (fast / slow windows)
-• The script writes the code into
-      strategies/<uuid4>.py
-  and prints that filename; evolve.py picks it up.
-
-Later we’ll:
-  • Add genetic / bayesian search
-  • Inject constraints (asset class, leverage, etc.)
-  • Use past winners as parents
+Generate N children strategies by mutating (or seeding) EMA parameters.
+Each child is written to outputs/child_<idx>_f<fast>_s<slow>.py
+A side-car JSON with the same params is written next to the .py file.
 """
 
-import random, uuid, pathlib, json, textwrap, os, datetime
+import argparse
+import json
+import os
+import random
+from typing import Dict, Any, Optional
 
-UNIVERSE = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
-OUT_DIR  = pathlib.Path(__file__).with_suffix("").parent / "strategies"
-OUT_DIR.mkdir(exist_ok=True)
+from google.cloud import firestore
 
-def generate():
-    sym   = random.choice(UNIVERSE)
-    fast  = random.randint(5, 30)
-    slow  = random.randint(fast + 5, fast + 60)
-    class_name = f"SMA_{sym}_{fast}_{slow}_{uuid.uuid4().hex[:6]}"
-    code = textwrap.dedent(f"""
-        from AlgorithmImports import *
+TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "algo_template.py")
+OUTPUT_DIR    = "outputs"
 
-        class {class_name}(QCAlgorithm):
-            def Initialize(self):
-                self.SetStartDate(2017, 1, 1)
-                self.SetEndDate(datetime.utcnow())
-                self.SetCash(100000)
-                self.symbol = self.AddEquity("{sym}", Resolution.Daily).Symbol
-                self.fast = self.SMA(self.symbol, {fast}, Resolution.Daily)
-                self.slow = self.SMA(self.symbol, {slow}, Resolution.Daily)
-                self.previous = None
 
-            def OnData(self, data):
-                if not (self.fast.IsReady and self.slow.IsReady): return
-                if self.previous == self.Time.date(): return
-                self.previous = self.Time.date()
+# ────────────────────────── helpers ──────────────────────────
+def load_template() -> str:
+    with open(TEMPLATE_PATH, "r") as fh:
+        return fh.read()
 
-                if self.fast.Current.Value > self.slow.Current.Value and not self.Portfolio[self.symbol].IsLong:
-                    self.SetHoldings(self.symbol, 1)
-                elif self.fast.Current.Value < self.slow.Current.Value and self.Portfolio[self.symbol].IsLong:
-                    self.Liquidate(self.symbol)
-    """)
-    file_path = OUT_DIR / f"{class_name}.py"
-    file_path.write_text(code)
-    meta = {
-        "strategy_file": str(file_path),
-        "symbol": sym,
-        "fast": fast,
-        "slow": slow,
-        "created": datetime.datetime.utcnow().isoformat()
-    }
-    print(json.dumps(meta))          # evolve.py consumes stdout
-    return file_path
+
+def mutate_params(base: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    """Return a fresh FAST/SLOW dict – mutated from base if supplied."""
+    if base:
+        fast = max(3, int(base["FAST_PERIOD"] + random.randint(-2, 2)))
+        slow = max(fast + 5, int(base["SLOW_PERIOD"] + random.randint(-5, 5)))
+    else:
+        fast = random.randint(5, 30)
+        slow = random.randint(fast + 10, 120)
+    return {"FAST_PERIOD": fast, "SLOW_PERIOD": slow}
+
+
+def render(code: str, params: Dict[str, int]) -> str:
+    for k, v in params.items():
+        code = code.replace(f"{{{{{k}}}}}", str(v))
+    return code
+
+
+# ─────────────────────────── main ────────────────────────────
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_children", type=int, default=5)
+    parser.add_argument(
+        "--inherit_from",
+        help="Firestore doc path holding winner params (written by select_winner.py)",
+    )
+    args = parser.parse_args()
+
+    # maybe pull parent params
+    parent_params = None
+    if args.inherit_from:
+        try:
+            snap = firestore.Client().document(args.inherit_from).get()
+            parent_params = snap.to_dict().get("params")
+            print(f"🔬  Base params from {args.inherit_from}: {parent_params}")
+        except Exception as e:
+            print(f"⚠️  Could not load parent params, falling back to random → {e}")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    template = load_template()
+
+    for i in range(args.num_children):
+        params = mutate_params(parent_params)
+        code   = render(template, params)
+
+        stem = f"child_{i+1}_f{params['FAST_PERIOD']}_s{params['SLOW_PERIOD']}"
+        py_path   = os.path.join(OUTPUT_DIR, stem + ".py")
+        json_path = os.path.join(OUTPUT_DIR, stem + ".json")
+
+        with open(py_path, "w") as fh:
+            fh.write(code)
+        with open(json_path, "w") as jh:
+            json.dump(params, jh)
+
+        print(f"✅  Wrote {py_path}")
+
 
 if __name__ == "__main__":
-    generate()
+    main()
