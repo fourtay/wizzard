@@ -1,71 +1,73 @@
 #!/usr/bin/env python3
 """
-store_results.py – upload QC back-test JSON to Firestore
+Push a single Lean back-test JSON file (backtest-results*.json) to Firestore.
+
+Handles both old and new QC schemas:
+  • {"results": {"statistics": …}}
+  • {"backtest": {"statistics": …}}
 """
 
-import os, json, sys
+import json, os, sys, glob
+from datetime import datetime
 from google.cloud import firestore
 
-RESULTS_FILE_PATH = "backtest-results.json"
-
-# ────────────────────────────────────────────────────────────
-#  1. Pull secrets from env
-# ────────────────────────────────────────────────────────────
-try:
-    GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
-    BACKTEST_ID     = os.environ["BACKTEST_ID"]
-except KeyError as err:
-    print(f"❌  Missing env var: {err}")
+# ───────────────────────────────────────────
+# 1. Locate newest back-test JSON
+# ───────────────────────────────────────────
+candidates = sorted(glob.glob("backtest-results*.json"), key=os.path.getmtime)
+if not candidates:
+    print("❌  No backtest-results*.json found")
     sys.exit(1)
 
-# ────────────────────────────────────────────────────────────
-#  2. Firestore client
-# ────────────────────────────────────────────────────────────
-with open("gcp_key.json", "w") as fh:
-    fh.write(GCP_SA_KEY_JSON)
+LATEST = candidates[-1]
+print(f"📖  Using {LATEST}")
+
+with open(LATEST, "r") as f:
+    data = json.load(f)
+
+# ───────────────────────────────────────────
+# 2. Extract statistics & charts (works for both schemas)
+# ───────────────────────────────────────────
+def extract(d: dict):
+    if "results" in d:      # old CLI
+        return d["results"].get("statistics"), d["results"].get("charts", {})
+    if "backtest" in d:     # new CLI
+        b = d["backtest"]
+        return b.get("statistics"), b.get("charts", {})
+    return None, None
+
+statistics, charts = extract(data)
+if not statistics:
+    print("❌  statistics block missing – aborting")
+    print(f"Top-level keys: {list(data.keys())}")
+    sys.exit(1)
+
+# ───────────────────────────────────────────
+# 3. Firestore – connect
+# ───────────────────────────────────────────
+GCP_SA_KEY = os.getenv("GCP_SA_KEY")
+BACKTEST_ID = os.getenv("BACKTEST_ID")  # set in evolve.yml
+
+if not (GCP_SA_KEY and BACKTEST_ID):
+    print("❌  GCP_SA_KEY or BACKTEST_ID env var missing")
+    sys.exit(1)
+
+with open("gcp_key.json", "w") as f:
+    f.write(GCP_SA_KEY)
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
+
 db = firestore.Client()
 print("✅  Firestore ready")
 
-# ────────────────────────────────────────────────────────────
-#  3. Load results JSON
-# ────────────────────────────────────────────────────────────
-try:
-    with open(RESULTS_FILE_PATH, "r") as fh:
-        data = json.load(fh)
-except FileNotFoundError:
-    print(f"❌  {RESULTS_FILE_PATH} not found")
-    sys.exit(1)
-except json.JSONDecodeError as err:
-    print(f"❌  Bad JSON – {err}")
-    sys.exit(1)
-
-# ────────────────────────────────────────────────────────────
-#  4. Locate statistics + charts
-# ────────────────────────────────────────────────────────────
-statistics = charts = None
-
-if "statistics" in data:           # legacy format
-    statistics = data["statistics"]
-    charts     = data.get("charts", {})
-    print("ℹ️  found statistics at root")
-elif "backtest" in data and "statistics" in data["backtest"]:
-    statistics = data["backtest"]["statistics"]
-    charts     = data["backtest"].get("charts", {})
-    print("ℹ️  found statistics under backtest → statistics")
-
-if not statistics:
-    print("❌  statistics block missing")
-    sys.exit(1)
-
-# ────────────────────────────────────────────────────────────
-#  5. Upload
-# ────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────
+# 4. Upload
+# ───────────────────────────────────────────
 doc = {
-    "name":        data.get("name", "Unnamed Backtest"),
-    "createdAt":   firestore.SERVER_TIMESTAMP,
-    "statistics":  statistics,
-    "charts":      charts,
+    "name": data.get("name", "Unnamed Backtest"),
+    "createdAt": firestore.SERVER_TIMESTAMP,
+    "statistics": statistics,
+    "charts": charts,
 }
+
 db.collection("backtest_results").document(BACKTEST_ID).set(doc)
-print(f"✅  Uploaded ➜ backtest_results/{BACKTEST_ID}")
+print(f"✨  Uploaded stats for {BACKTEST_ID}")
