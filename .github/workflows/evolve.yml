@@ -1,61 +1,65 @@
+# .github/workflows/evolve.yml
 name: evolve
+
 on:
-  schedule:
-    - cron:  '*/30 * * * *'          # every 30 min
-  workflow_dispatch:
+  workflow_dispatch:              # manual
+  schedule:                       # every 10 min
+    - cron: '*/10 * * * *'
+
+concurrency:
+  group: evolve
+  cancel-in-progress: true
+
+env:
+  NUM_CHILDREN: 5
+  QC_PROJECT_ID: 23708106
+  LEAN_CLI_VERSION: "2.5.0"
+  LEAN_CLOUD_TIMEOUT: 1200        # sec
 
 jobs:
+
   evolve:
     runs-on: ubuntu-latest
-    env:
-      LEAN_CLOUD_PROJECT: ${{ secrets.LEAN_PROJECT_ID }}
-      LEAN_API_TOKEN:     ${{ secrets.LEAN_API_TOKEN }}
-      GCP_SA_KEY:         ${{ secrets.GCP_SA_KEY }}
-      FIRESTORE_PROJECT:  ${{ secrets.FIRESTORE_PROJECT }}   # <-- new
-      NUM_CHILDREN: 5
     steps:
 
+    # ---- Step 0: checkout code ---------------------------------------------
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    # -------- 1. Generate candidate code ------------------------------------
-    - name: 🧬 Generate new child strategy
-      run: python scripts/algo_gen.py --num $NUM_CHILDREN
-
-    # -------- 2. Back-test the candidate ------------------------------------
-    - name: 🚀 Run back-test in Lean Cloud
+    # ---- Step 1: spawn N child strategies ----------------------------------
+    - name: Generate new child strategy
       run: |
-        BACKTEST_ID=$(lean cloud backtest "$LEAN_CLOUD_PROJECT" \
-                      --name "candidate-$(date +%s)" \
-                      | grep -oP 'Backtest id: \K[0-9a-f]+')
-        echo "BACKTEST_ID=$BACKTEST_ID" >> $GITHUB_ENV
+        python algo_gen.py --num $NUM_CHILDREN
 
-    # -------- 3. Download results & save to Firestore -----------------------
-    - name: 📥 Download results.json
+    # ---- Step 2: run QC cloud back-test -------------------------------------
+    - name: Run back-test in Lean Cloud
       run: |
-        lean cloud backtest-results "$LEAN_CLOUD_PROJECT" \
-             --backtest-id "$BACKTEST_ID" \
-             --output backtest-results.json
-
-    - name: 🗄️  Store results in Firestore
-      run: python scripts/store_results.py
+        lean cloud backtest "$QC_PROJECT_ID" \
+          --timeout $LEAN_CLOUD_TIMEOUT \
+          --output backtest-results.json
       env:
-        BACKTEST_ID: ${{ env.BACKTEST_ID }}
+        LEAN_CLI_VERSION: ${{ env.LEAN_CLI_VERSION }}
+        QC_PROJECT_ID:    ${{ env.QC_PROJECT_ID }}
 
-    # -------- 4. Evaluate vs champion ---------------------------------------
-    - name: 🏆 Evaluate candidate
-      id: evaluate
-      run: python scripts/evaluate.py
+    # ---- Step 3: download results.json (already produced above) -------------
+    - name: Download results.json
+      run: |
+        echo "Results saved as backtest-results.json"
+
+    # ---- Step 4: store results in Firestore ---------------------------------
+    - name: Store results in Firestore
+      run: |
+        python store_results.py
       env:
-        BACKTEST_ID:       ${{ env.BACKTEST_ID }}
+        BACKTEST_ID: ${{ github.run_id }}
+        GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
 
-    # -------- 5. Promote if better ------------------------------------------
-    - name: 🚢 Promote new champion
-      if: success() && steps.evaluate.outputs.promote == 'true'
-      uses: peter-evans/create-pull-request@v6
-      with:
-        branch: champion
-        commit-message: "Promote ${{ env.BACKTEST_ID }} to champion"
-        title: "Automated promotion of better strategy"
-        body: "Sharpe improved – promoted automatically."
+    # ---- Step 5: evaluate vs champion ---------------------------------------
+    - name: Evaluate candidate
+      run: |
+        python select_winner.py
 
+    # ---- Step 6: promote if better ------------------------------------------
+    - name: Promote new champion
+      run: |
+        python select_champion.py
