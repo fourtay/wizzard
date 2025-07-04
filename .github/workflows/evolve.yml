@@ -1,71 +1,61 @@
-# .github/workflows/evolve.yml
 name: evolve
-
 on:
-  workflow_dispatch:
   schedule:
-    # every 10 minutes
-    - cron: "*/10 * * * *"
-
-env:
-  NUM_CHILDREN: 5
-  MUTATION_RATE: 0.2
-  CHAMPION_BRANCH: champion
-  PYTHON_VERSION: "3.10"
+    - cron:  '*/30 * * * *'          # every 30 min
+  workflow_dispatch:
 
 jobs:
   evolve:
     runs-on: ubuntu-latest
-
+    env:
+      LEAN_CLOUD_PROJECT: ${{ secrets.LEAN_PROJECT_ID }}
+      LEAN_API_TOKEN:     ${{ secrets.LEAN_API_TOKEN }}
+      GCP_SA_KEY:         ${{ secrets.GCP_SA_KEY }}
+      FIRESTORE_PROJECT:  ${{ secrets.FIRESTORE_PROJECT }}   # <-- new
+      NUM_CHILDREN: 5
     steps:
-      - name: 🧹  Checkout repo
-        uses: actions/checkout@v4
 
-      - name: 🐍  Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+    - name: Checkout repo
+      uses: actions/checkout@v4
 
-      # 1️⃣  Generate a new candidate algorithm ---------------------------------
-      - name: ✨  Generate candidate
-        run: |
-          python scripts/algo_gen.py \
-            --children $NUM_CHILDREN \
-            --mutation $MUTATION_RATE
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    # -------- 1. Generate candidate code ------------------------------------
+    - name: 🧬 Generate new child strategy
+      run: python scripts/algo_gen.py --num $NUM_CHILDREN
 
-      # 2️⃣  Commit it back on a temp branch ------------------------------------
-      - name: 📤  Commit candidate
-        run: |
-          BRANCH="candidate-$(date +%s)"
-          git switch -c "$BRANCH"
-          git add algorithms/
-          git commit -m "🤖 new candidate"
-          git push origin "$BRANCH"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # -------- 2. Back-test the candidate ------------------------------------
+    - name: 🚀 Run back-test in Lean Cloud
+      run: |
+        BACKTEST_ID=$(lean cloud backtest "$LEAN_CLOUD_PROJECT" \
+                      --name "candidate-$(date +%s)" \
+                      | grep -oP 'Backtest id: \K[0-9a-f]+')
+        echo "BACKTEST_ID=$BACKTEST_ID" >> $GITHUB_ENV
 
-      # 3️⃣  Run backtest + store results --------------------------------------
-      - name: 🚀  Run backtest
-        run: |
-          lean cloud backtest "algorithms/candidate.py" --output backtest-results.json
+    # -------- 3. Download results & save to Firestore -----------------------
+    - name: 📥 Download results.json
+      run: |
+        lean cloud backtest-results "$LEAN_CLOUD_PROJECT" \
+             --backtest-id "$BACKTEST_ID" \
+             --output backtest-results.json
 
-      - name: 🗄️  Store results in Firestore
-        run: python scripts/store_results.py
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          BACKTEST_ID: ${{ github.run_id }}
+    - name: 🗄️  Store results in Firestore
+      run: python scripts/store_results.py
+      env:
+        BACKTEST_ID: ${{ env.BACKTEST_ID }}
 
-      # 4️⃣  Evaluate and (maybe) promote --------------------------------------
-      - name: 🏆  Evaluate vs champion
-        run: python scripts/evaluate.py
-        env:
-          FIRESTORE_PROJECT: "YOUR_GCP_PROJECT_ID"
+    # -------- 4. Evaluate vs champion ---------------------------------------
+    - name: 🏆 Evaluate candidate
+      id: evaluate
+      run: python scripts/evaluate.py
+      env:
+        BACKTEST_ID:       ${{ env.BACKTEST_ID }}
 
-      - name: ⬆️  Promote new champion if better
-        if: success() && steps.evaluate.outputs.promote == 'true'
-        run: |
-          git switch ${{ env.CHAMPION_BRANCH }}
-          git merge --no-ff "$BRANCH" -m "🏆 promote new champion"
-          git push origin ${{ env.CHAMPION_BRANCH }}
+    # -------- 5. Promote if better ------------------------------------------
+    - name: 🚢 Promote new champion
+      if: success() && steps.evaluate.outputs.promote == 'true'
+      uses: peter-evans/create-pull-request@v6
+      with:
+        branch: champion
+        commit-message: "Promote ${{ env.BACKTEST_ID }} to champion"
+        title: "Automated promotion of better strategy"
+        body: "Sharpe improved – promoted automatically."
+
