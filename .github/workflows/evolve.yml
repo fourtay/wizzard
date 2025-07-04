@@ -1,68 +1,115 @@
-# .github/workflows/evolve.yml
-name: evolve
+name: evolve          # automatic genetic-style strategy search
 
+# ────────────────────────────────
+# 1. Triggers
+# ────────────────────────────────
 on:
-  workflow_dispatch:          # run manually from GitHub UI
-  schedule:                   # or every 10 minutes
-    - cron: '*/10 * * * *'
+  workflow_dispatch:          # run manually from the Actions tab
+  schedule:                   # or run every 30 min
+    - cron: '*/30 * * * *'
 
-# ──────────────────────────────────────────────────────────────────────────────
-env:                          # tweak these if you wish
-  NUM_CHILDREN: "5"           # how many new algos per generation
-  PROJECT_ID: "23708106"      # QuantConnect project GUID
-  COLLECTION: "backtest_results"      # Firestore collection
-  GOOGLE_APPLICATION_CREDENTIALS: gcp_key.json
+# ────────────────────────────────
+# 2. Global defaults
+# ────────────────────────────────
+env:
+  # genetic exploration settings
+  NUM_CHILDREN: 6             # how many variants per generation
+  FAST_MIN: 5                 # SMA fast period search range
+  FAST_MAX: 25
+  SLOW_MIN: 30                # SMA slow period search range
+  SLOW_MAX: 60
+
+  # QuantConnect project ID (already exists in your QC org)
+  PROJECT_ID: 23708106
+
+# ────────────────────────────────
+# 3. Jobs
+# ────────────────────────────────
 
 jobs:
-  evolve:
+
+  # ── J-1: Generate children code files ─────────────────────────────
+  generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-      # 1 Checkout repo
-      - uses: actions/checkout@v4
+      - name: ⬇️  Checkout repo
+        uses: actions/checkout@v3
 
-      # 2 Python
-      - uses: actions/setup-python@v5
+      - name: 🐍  Setup Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.10'
 
-      # 3 Install deps
-      - name: Install Python requirements
+      - name: 📦  Install deps for algo_gen
+        run: pip install numpy
+
+      - name: 🧬  Run algorithm generator
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python tools/algo_gen.py \
+            --num $NUM_CHILDREN \
+            --fast-min $FAST_MIN --fast-max $FAST_MAX \
+            --slow-min $SLOW_MIN --slow-max $SLOW_MAX
 
-      # 4 Write GCP service-account key to disk
-      - name: Write GCP key
+      # outputs/ now contains:
+      #   child_0.py … child_5.py
+      #   params_0.json … params_5.json
+
+  # ── J-2: One back-test per child (matrix) ─────────────────────────
+  backtest-child:
+    needs: generate
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        idx: [0, 1, 2, 3, 4, 5]        #  NUM_CHILDREN slots
+
+    env:
+      CHILD_IDX: ${{ matrix.idx }}
+      PROJECT_ID: ${{ env.PROJECT_ID }}
+
+    steps:
+      - name: ⬇️  Checkout repo
+        uses: actions/checkout@v3
+
+      - name: 🐍  Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 💾  Install Lean CLI
+        run: pip install quantconnect-lean
+
+      - name: 📑  Copy generated child code & params
+        run: |
+          mkdir -p strategy
+          cp outputs/child_${CHILD_IDX}.py strategy/main.py
+          cp outputs/params_${CHILD_IDX}.json params.json
+
+      - name: 🚀  Run cloud back-test
+        id: backtest
+        run: |
+          lean cloud backtest "$PROJECT_ID" \
+            --project-path strategy \
+            --name "auto_${CHILD_IDX}" \
+            --output backtest-results.json
+
+      - name: 🔎  Extract BACKTEST_ID from JSON
+        id: extract
+        run: |
+          BACKTEST_ID=$(jq -r '.backtest' backtest-results.json)
+          echo "id=$BACKTEST_ID" >> "$GITHUB_OUTPUT"
+
+      # ── NEW: copy params.json so store_results picks it up
+      - name: 📨  Attach params.json
+        if: steps.backtest.outcome == 'success'
+        run: |
+          cp params.json params.json || true
+
+      - name: 🗄️  Store stats + params to Firestore
+        if: steps.backtest.outcome == 'success'
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}   # add this in repo → Settings → Secrets
+          BACKTEST_ID: ${{ steps.extract.outputs.id }}
+          GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
         run: |
-          echo "$GCP_SA_KEY" > gcp_key.json
-
-      # 5 Generate new algos (“children”)
-      - name: Generate children
-        run: |
-          python tools/algogen/algo_gen.py \
-            --num_children "$NUM_CHILDREN"
-
-      # 6 Iterate through children & run QC back-tests
-      - name: Run back-tests in the cloud
-        run: |
-          for child in outputs/*.py; do
-            echo "📤  Testing $child"
-            lean cloud backtest "$PROJECT_ID" --code "$child" \
-              --output backtest-results.json
-            python tools/algogen/store_results.py  # uploads the JSON
-          done
-
-      # 7 Pick the best-performing child (S6)
-      - name: Select generation winner
-        run: python tools/algogen/select_winner.py
-
-      # 8 Evolve parameters for next generation
-      - name: Evolve into next generation
-        run: |
-          python tools/algogen/evolve.py \
-            --num_children "$NUM_CHILDREN" \
-            --inherit_from firestore:evolve_state/parent
+          python tools/store_results.py
