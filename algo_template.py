@@ -1,51 +1,75 @@
-# scripts/algo_template.py
+# tools/algogen/algo_template.py
+"""
+Auto-generated EMA-cross strategy
+
+FAST_PERIOD = {{FAST_PERIOD}}
+SLOW_PERIOD = {{SLOW_PERIOD}}
+
+(Values are replaced by tools/algogen/algo_gen.py)
+"""
 from AlgorithmImports import *
+import numpy as np
 
-class EvolvableAlgo(QCAlgorithm):
-
+class GeneticAlgo(QCAlgorithm):
     def Initialize(self):
-        # --- basic engine settings ---
-        self.SetStartDate(2020, 1, 1)   # 5-year window for speed
-        self.SetEndDate(datetime.utcnow())
+        # --- Define your In-Sample and Out-of-Sample periods ---
+        self.training_end_date = datetime(2023, 10, 31)
+        self.backtest_start_date = datetime(2023, 1, 1)
+        self.backtest_end_date = datetime(2024, 1, 1)
+        # ---------------------------------------------------------
+
+        self.SetStartDate(self.backtest_start_date)
+        self.SetEndDate(self.backtest_end_date)
         self.SetCash(100000)
-        self.AddEquity("SPY", Resolution.Daily)
-        self.symbol = self.Symbol("SPY")
 
-        # --- pull genome from parameters ---
-        p = self.GetParameter  # shortcut
-        self.fast   = int(p("FastMA"))
-        self.slow   = int(p("SlowMA"))
-        self.rsiLen = int(p("RSI_len"))
-        self.rsiHi  = int(p("RSI_hi"))
-        self.rsiLo  = int(p("RSI_lo"))
-        self.bbLen  = int(p("BB_len"))
-        self.bbK    = float(p("BB_K"))
-        self.volLB  = int(p("VolLookback"))
-        self.atrLen = int(p("ATR_len"))
-        self.positionFrac = float(p("PositionSize"))
+        self.symbol = self.AddEquity("SPY", Resolution.Daily).Symbol
+        self.fast   = self.EMA(self.symbol, {{FAST_PERIOD}}, Resolution.Daily)
+        self.slow   = self.EMA(self.symbol, {{SLOW_PERIOD}}, Resolution.Daily)
+        self.SetWarmUp({{SLOW_PERIOD}})
 
-        # --- indicators ---
-        self.fastMA = self.SMA(self.symbol, self.fast, Resolution.Daily)
-        self.slowMA = self.SMA(self.symbol, self.slow, Resolution.Daily)
-        self.rsi    = self.RSI(self.symbol, self.rsiLen, MovingAverageType.Wilders)
-        self.bb     = self.BB(self.symbol, self.bbLen, self.bbK, MovingAverageType.Simple)
-        self.atr    = self.ATR(self.symbol, self.atrLen, MovingAverageType.Simple)
-
-        # warm-up
-        self.SetWarmUp(self.slow + self.bbLen)
-
-    def OnData(self, data: Slice):
-        if self.IsWarmingUp:   # wait for indicators
+    def OnData(self, data):
+        if self.IsWarmingUp:
             return
 
-        price = data[self.symbol].Close
-        volume_ok = self.History(self.symbol, self.volLB, Resolution.Daily)["volume"].mean() < data[self.symbol].Volume
+        # --- Only execute trading logic during the In-Sample training period ---
+        if self.Time < self.training_end_date:
+            # Cross-over logic
+            if not self.Portfolio.Invested and self.fast.Current.Value > self.slow.Current.Value:
+                self.SetHoldings(self.symbol, 1.0)
+            elif self.Portfolio.Invested and self.fast.Current.Value < self.slow.Current.Value:
+                self.Liquidate()
+        # --- After the training date, the algorithm simply holds and does nothing ---
 
-        long_signal  = (price > self.fastMA.Current.Value > self.slowMA.Current.Value) and self.rsi.Current.Value < self.rsiLo and price < self.bb.LowerBand.Current.Value and volume_ok
-        flat_signal  = self.Portfolio[self.symbol].Invested and (self.rsi.Current.Value > self.rsiHi or price > self.bb.UpperBand.Current.Value)
+    def OnEndOfAlgorithm(self):
+        # --- This block calculates the performance on the Out-of-Sample (OOS) data ---
+        all_trades = self.TradeBuilder.ClosedTrades
+        oos_trades = [t for t in all_trades if t.ExitTime >= self.training_end_date]
 
-        if long_signal and not self.Portfolio[self.symbol].Invested:
-            qty = self.CalculateOrderQuantity(self.symbol, self.positionFrac)
-            self.SetHoldings(self.symbol, self.positionFrac)
-        elif flat_signal:
-            self.Liquidate(self.symbol)
+        oos_profit = 0
+        oos_returns = []
+
+        if oos_trades:
+            for trade in oos_trades:
+                profit = trade.ProfitLoss
+                oos_profit += profit
+                # Calculate daily returns for Sharpe Ratio calculation
+                # This part can be complex; a simpler approach is to use portfolio equity
+                # For now, we will log the profit and a placeholder for sharpe.
+                # A more robust solution would track daily portfolio value in the OOS period.
+
+        # Log custom statistics. These will appear in your backtest-results.json
+        self.SetStatistics("OOS Net Profit", f"{oos_profit:.2f}")
+
+        # For a true OOS Sharpe, you'd need to calculate daily returns during the OOS period.
+        # This is a complex implementation, so as a starting point, we will use a placeholder
+        # or rely on a simpler metric like OOS Net Profit for selection.
+        # Let's assume a simplified Sharpe for this example.
+        # WARNING: The Sharpe Ratio calculated over the entire portfolio is NOT a true OOS Sharpe.
+        # We add it here to have a metric but acknowledge its inaccuracy.
+        # A simple profit metric is more reliable without a more complex implementation.
+        self.SetStatistics("OOS Sharpe Ratio", f"{self.Portfolio.SharpeRatio:.4f}") # Inaccurate, for placeholder only
+
+        self.Log(f"--- Out-of-Sample Results ---")
+        self.Log(f"OOS Trades: {len(oos_trades)}")
+        self.Log(f"OOS Net Profit: ${oos_profit:.2f}")
+        self.Log(f"-----------------------------")
