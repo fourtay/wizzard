@@ -1,128 +1,72 @@
-# ──────────────────────────────────────────────────────────────────────────────
-#  GitHub Actions – Evolution Loop
-#  ──────────────────────────────────────────────────────────────────────────────
-#  1. generate-children   ─→ create NUM_CHILDREN mutated algos (tools/algo_gen.py)
-#  2. backtest-child      ─→ push each child to QC Cloud, run back-test, save JSON
-#  3. select-champion     ─→ read Firestore ➜ pick best performer, save champion
-#
-#    • NUM_CHILDREN, MUTATION_RATE drive exploration depth
-#    • QC_PROJECT_ID is your QuantConnect cloud project
-#    • GCP_SA_KEY (secret) lets the job write results to Firestore
-# ──────────────────────────────────────────────────────────────────────────────
-
-name: evolve
+name: evolve  # nightly genetic evolution run
 
 on:
-  workflow_dispatch:          # manual trigger button
+  # run every night at 02:00 UTC
   schedule:
-    - cron: "*/30 * * * *"    # every 30 min (adjust if you like)
-
-env:
-  NUM_CHILDREN:      5              # number of offspring per generation
-  MUTATION_RATE:     0.20           # 0-1  (20 % of params mutate)
-  QC_PROJECT_ID:     23708106       # your QuantConnect cloud project
-  PYTHON_VERSION:    "3.10"
+    - cron: "0 2 * * *"
+  # allow manual trigger from Actions tab
+  workflow_dispatch:
 
 jobs:
-# ────────────────────────────────────────────────────────────────────────────
-#  JOB 1 ▸ generate-children
-# ────────────────────────────────────────────────────────────────────────────
-  generate-children:
+  # ─────────────────────────────────────────
+  # 1 ▸ spawn children and back-test them
+  # ─────────────────────────────────────────
+  children:
     runs-on: ubuntu-latest
-    outputs:
-      child_matrix: ${{ steps.matrix.outcome }}
+    env:
+      NUM_CHILDREN: 8            # ← tweak population size here
+      QCCLI_PROJECT_ID: ${{ secrets.QC_PROJECT_ID }}
+      QC_API_TOKEN:    ${{ secrets.QC_API_TOKEN }}
+      GCP_SA_KEY:      ${{ secrets.GCP_SA_KEY }}
     steps:
-      - name: ⬇️  Checkout repo
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: 🐍  Setup Python
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: {python-version: '3.10'}
+
+      - name: Install deps
+        run: pip install google-cloud-firestore requests
+
+      - name: Spawn children algos
+        run: python tools/algo_gen.py
+
+      - name: Run back-tests
+        run: python tools/evolve.py            # driver → QC back-tests -> backtest-results.json*
+
+      - name: Upload back-test bundle
+        uses: actions/upload-artifact@v4
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          name: all-backtests
+          path: backtest-results*.json
 
-      - name: 🧬  Generate mutated children
-        run: |
-          python tools/algo_gen.py \
-            --num        "${NUM_CHILDREN}" \
-            --mutation   "${MUTATION_RATE}"
-          ls -1 children
-
-      - name: 🔢  Build matrix for next job
-        id: matrix
-        run: |
-          list=$(ls children | jq -R -s -c 'split("\n")[:-1] | map({"child": .})')
-          echo "outcome=$list" >> "$GITHUB_OUTPUT"
-
-      - name: 📦  Upload children artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: children
-          path: children/
-
-# ────────────────────────────────────────────────────────────────────────────
-#  JOB 2 ▸ backtest each child (matrix)
-# ────────────────────────────────────────────────────────────────────────────
-  backtest-child:
-    needs: generate-children
+  # ─────────────────────────────────────────
+  # 2 ▸ select best child → promote to parent
+  # ─────────────────────────────────────────
+  champion:
+    needs: children          # wait until children job finishes
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.generate-children.outputs.child_matrix) }}
-
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: 📥  Download child file
-        uses: actions/download-artifact@v3
-        with:
-          name: children
-          path: children
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: {python-version: '3.10'}
 
-      - name: ⚙️  Install Lean CLI
-        run: pip install lean==1.1.143
+      - name: Install Firestore client
+        run: pip install google-cloud-firestore
 
-      - name: 🚀  Push & back-test in QC Cloud
-        run: |
-          CHILD="children/${{ matrix.child }}"
-          lean cloud push "$CHILD" --project $QC_PROJECT_ID
-          NAME=$(basename "$CHILD" .py)
-          lean cloud backtest $QC_PROJECT_ID \
-               --name "$NAME" \
-               --output backtest-results.json
-
-      - name: 🔑  Write GCP key
-        run: echo "${{ secrets.GCP_SA_KEY }}" > gcp_key.json
-
-      - name: 🗃  Store results in Firestore
-        run: python tools/store_results.py
+      - name: Pick champion & promote
         env:
-          BACKTEST_ID: ${{ matrix.child }}
-          GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          python tools/select_champion.py
+          echo "🏆 champion written → champion.json & parent_algo.json"
 
-# ────────────────────────────────────────────────────────────────────────────
-#  JOB 3 ▸ select-champion
-# ────────────────────────────────────────────────────────────────────────────
-  select-champion:
-    needs: backtest-child
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: 🐍  Setup Python
-        uses: actions/setup-python@v4
+      - name: Upload champion artefacts
+        uses: actions/upload-artifact@v4
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: 🔑  Write GCP key
-        run: echo "${{ secrets.GCP_SA_KEY }}" > gcp_key.json
-
-      - name: 🏆  Pick best back-test & save DNA
-        run: python tools/select_champion.py
-
-      - name: 📤  Commit champion DNA
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "ci: update champion DNA"
-          file_pattern: champion.json
+          name: champion
+          path: |
+            champion.json
+            parent_algo.json
