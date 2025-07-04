@@ -1,83 +1,60 @@
-# tools/algogen/algo_gen.py
+#!/usr/bin/env python3
 """
-Generate N children strategies by mutating (or seeding) EMA parameters.
-Each child is written to outputs/child_<idx>_f<fast>_s<slow>.py
-A side-car JSON with the same params is written next to the .py file.
+Generate NUM_CHILDREN mutated parameter sets from champion.json.
+
+Outputs: children/child_<n>.json
 """
 
-import argparse
-import json
-import os
-import random
-from typing import Dict, Any, Optional
+import json, os, random, pathlib, math
 
-from google.cloud import firestore
+NUM_CHILDREN = int(os.getenv("NUM_CHILDREN", 5))
+CHAMPION_FILE = "champion.json"
+OUT_DIR = pathlib.Path("children")
+OUT_DIR.mkdir(exist_ok=True)
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "algo_template.py")
-OUTPUT_DIR    = "outputs"
+# ═══════════════  helpers  ════════════════
+def mutate(value, scale=0.3, minimum=1e-6):
+    """Gaussian mutate a float or int, keep >0."""
+    noise = random.gauss(0, abs(value) * scale or 1)
+    v = value + noise
+    if isinstance(value, int):
+        v = int(round(v))
+    return max(v, minimum)
 
+def bounded(val, lo=None, hi=None):
+    if lo is not None:
+        val = max(val, lo)
+    if hi is not None:
+        val = min(val, hi)
+    return val
 
-# ────────────────────────── helpers ──────────────────────────
-def load_template() -> str:
-    with open(TEMPLATE_PATH, "r") as fh:
-        return fh.read()
+# ═══════════════  main  ═══════════════════
+with open(CHAMPION_FILE) as f:
+    champion = json.load(f)
 
+params = champion["parameters"]  # e.g. {"lookback": 20, "threshold": 0.7, …}
 
-def mutate_params(base: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
-    """Return a fresh FAST/SLOW dict – mutated from base if supplied."""
-    if base:
-        fast = max(3, int(base["FAST_PERIOD"] + random.randint(-2, 2)))
-        slow = max(fast + 5, int(base["SLOW_PERIOD"] + random.randint(-5, 5)))
-    else:
-        fast = random.randint(5, 30)
-        slow = random.randint(fast + 10, 120)
-    return {"FAST_PERIOD": fast, "SLOW_PERIOD": slow}
+print(f"Champion params: {params}")
+children = []
 
-
-def render(code: str, params: Dict[str, int]) -> str:
+for i in range(NUM_CHILDREN):
+    child = {"parameters": {}}
     for k, v in params.items():
-        code = code.replace(f"{{{{{k}}}}}", str(v))
-    return code
+        if isinstance(v, (int, float)):
+            nv = mutate(v)
+            # clamp example ranges
+            if k == "lookback":
+                nv = bounded(int(nv), 5, 100)
+            elif k == "threshold":
+                nv = bounded(nv, 0.01, 0.99)
+            child["parameters"][k] = nv
+        else:
+            # categorical? random pick
+            child["parameters"][k] = random.choice([v, v])  # placeholder
+    children.append(child)
+    out_path = OUT_DIR / f"child_{i}.json"
+    with open(out_path, "w") as f:
+        json.dump(child, f, indent=2)
+    print(f"▶︎ wrote {out_path}")
 
-
-# ─────────────────────────── main ────────────────────────────
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--num_children", type=int, default=5)
-    parser.add_argument(
-        "--inherit_from",
-        help="Firestore doc path holding winner params (written by select_winner.py)",
-    )
-    args = parser.parse_args()
-
-    # maybe pull parent params
-    parent_params = None
-    if args.inherit_from:
-        try:
-            snap = firestore.Client().document(args.inherit_from).get()
-            parent_params = snap.to_dict().get("params")
-            print(f"🔬  Base params from {args.inherit_from}: {parent_params}")
-        except Exception as e:
-            print(f"⚠️  Could not load parent params, falling back to random → {e}")
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    template = load_template()
-
-    for i in range(args.num_children):
-        params = mutate_params(parent_params)
-        code   = render(template, params)
-
-        stem = f"child_{i+1}_f{params['FAST_PERIOD']}_s{params['SLOW_PERIOD']}"
-        py_path   = os.path.join(OUTPUT_DIR, stem + ".py")
-        json_path = os.path.join(OUTPUT_DIR, stem + ".json")
-
-        with open(py_path, "w") as fh:
-            fh.write(code)
-        with open(json_path, "w") as jh:
-            json.dump(params, jh)
-
-        print(f"✅  Wrote {py_path}")
-
-
-if __name__ == "__main__":
-    main()
+print(f"Generated {len(children)} children")
