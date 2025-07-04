@@ -1,66 +1,66 @@
-name: evolve
-on:
-  workflow_dispatch:
-  schedule:
-    # every 30 min – adjust if you need longer QC queues
-    - cron: "*/30 * * * *"
+#  .github/workflows/evolve.yml
+#  ───────────────────────────
+#  Fires every 30 min (or on-demand) → generates N child algos,
+#  commits them, runs a Lean Cloud back-test, then writes the
+#  results JSON to Firestore.
 
+name: evolve
+
+# ─── Triggers ──────────────────────────────────────────────────────
+on:
+  workflow_dispatch:            # run manually from the Actions tab
+  schedule:
+    - cron: '*/30 * * * *'      # every 30 minutes (UTC)
+
+# ─── Global env vars (edit if you like) ────────────────────────────
+env:
+  PYTHON_VERSION: '3.10'
+  NUM_CHILDREN: '5'             # children per generation
+  QC_PROJECT_ID: ${{ secrets.QC_PROJECT_ID }}
+  QC_API_TOKEN:  ${{ secrets.QC_API_TOKEN }}
+
+# ─── One-job pipeline ──────────────────────────────────────────────
 jobs:
   evolve:
     runs-on: ubuntu-latest
-    env:
-      # ---------- user-controlled knobs ----------
-      NUM_CHILDREN: "5"           # how many algos per round
-      NUM_SURVIVORS: "2"          # how many winners keep breeding
-      PROJECT_ID: "23708106"      # ← your QC project ID
-      BACKTEST_COLLECTION: "backtest_results"  # Firestore collection
+    timeout-minutes: 30
+
     steps:
+    # 1️⃣  Check out repo
+    - uses: actions/checkout@v4
 
-      ## 1️⃣  checkout repo
-      - uses: actions/checkout@v4
+    # 2️⃣  Set up Python
+    - name: Setup Python ${{ env.PYTHON_VERSION }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      ## 2️⃣  set up Python & Lean CLI
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - name: Install deps
-        run: |
-          pip install quantconnect-lean google-cloud-firestore
+    # 3️⃣  Install deps
+    - name: Install Python requirements
+      run: |
+        pip install -r requirements.txt
+        pip install lean-cli==1.0.215  # pin a known-good Lean CLI
 
-      ## 3️⃣  generate children
-      - name: Generate new algos
-        run: |
-          python wizard/algo_gen.py --num "${{ env.NUM_CHILDREN }}"
+    # 4️⃣  Generate new strategies
+    - name: Generate ${{ env.NUM_CHILDREN }} child algos
+      run: |
+        python tools/algogen/evolve.py --num_children $NUM_CHILDREN
 
-      ## 4️⃣  run cloud back-tests
-      - name: Launch backtests on QC
-        env:
-          QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
-        run: |
-          python wizard/run_backtests.py
+    # 5️⃣  Commit & push any new files
+    - name: Commit offspring to repo
+      run: |
+        git config --global user.name  "evolve-bot"
+        git config --global user.email "actions@github.com"
+        git add .
+        git commit -m "genetic-run: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "nothing to commit"
+        git push || echo "nothing to push"
 
-      ## 5️⃣  wait for completion (poll QC)
-      - name: Wait for backtests to finish
-        env:
-          QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
-        run: |
-          python wizard/wait_backtests.py
-
-      ## 6️⃣  select survivors + push stats to Firestore
-      - name: Pick winners & upload stats
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          NUM_SURVIVORS: ${{ env.NUM_SURVIVORS }}
-          BACKTEST_COLLECTION: ${{ env.BACKTEST_COLLECTION }}
-        run: |
-          python wizard/select_survivors.py
-
-      ## 7️⃣  persist run artefacts
-      - name: Upload children & logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: evolve-${{ github.run_id }}
-          path: |
-            wizard/children/
-            wizard/backtests.json
-            parents.txt
+    # 6️⃣  Compile & back-test in Lean Cloud, store JSON in Firestore
+    - name: Back-test each new algo & store results
+      env:
+        GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      run: |
+        python tools/algogen/backtest_and_store.py \
+          --project_id $QC_PROJECT_ID \
+          --qc_token  $QC_API_TOKEN \
+          --children  $NUM_CHILDREN
