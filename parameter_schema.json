@@ -1,0 +1,22 @@
+{
+  "FAST_PERIOD": {
+    "type": "int",
+    "min": 5,
+    "max": 50
+  },
+  "SLOW_PERIOD": {
+    "type": "int",
+    "min": 60,
+    "max": 200
+  },
+  "SYMBOL": {
+    "type": "choice",
+    "values": [
+      "SPY",
+      "QQQ",
+      "GLD",
+      "IWM",
+      "DIA"
+    ]
+  }
+}
