@@ -1,66 +1,68 @@
-#  .github/workflows/evolve.yml
-#  ───────────────────────────
-#  Fires every 30 min (or on-demand) → generates N child algos,
-#  commits them, runs a Lean Cloud back-test, then writes the
-#  results JSON to Firestore.
-
+# .github/workflows/evolve.yml
 name: evolve
 
-# ─── Triggers ──────────────────────────────────────────────────────
 on:
-  workflow_dispatch:            # run manually from the Actions tab
-  schedule:
-    - cron: '*/30 * * * *'      # every 30 minutes (UTC)
+  workflow_dispatch:          # run manually from GitHub UI
+  schedule:                   # or every 10 minutes
+    - cron: '*/10 * * * *'
 
-# ─── Global env vars (edit if you like) ────────────────────────────
-env:
-  PYTHON_VERSION: '3.10'
-  NUM_CHILDREN: '5'             # children per generation
-  QC_PROJECT_ID: ${{ secrets.QC_PROJECT_ID }}
-  QC_API_TOKEN:  ${{ secrets.QC_API_TOKEN }}
+# ──────────────────────────────────────────────────────────────────────────────
+env:                          # tweak these if you wish
+  NUM_CHILDREN: "5"           # how many new algos per generation
+  PROJECT_ID: "23708106"      # QuantConnect project GUID
+  COLLECTION: "backtest_results"      # Firestore collection
+  GOOGLE_APPLICATION_CREDENTIALS: gcp_key.json
 
-# ─── One-job pipeline ──────────────────────────────────────────────
 jobs:
   evolve:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-    # 1️⃣  Check out repo
-    - uses: actions/checkout@v4
+      # 1 Checkout repo
+      - uses: actions/checkout@v4
 
-    # 2️⃣  Set up Python
-    - name: Setup Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      # 2 Python
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    # 3️⃣  Install deps
-    - name: Install Python requirements
-      run: |
-        pip install -r requirements.txt
-        pip install lean-cli==1.0.215  # pin a known-good Lean CLI
+      # 3 Install deps
+      - name: Install Python requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    # 4️⃣  Generate new strategies
-    - name: Generate ${{ env.NUM_CHILDREN }} child algos
-      run: |
-        python tools/algogen/evolve.py --num_children $NUM_CHILDREN
+      # 4 Write GCP service-account key to disk
+      - name: Write GCP key
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}   # add this in repo → Settings → Secrets
+        run: |
+          echo "$GCP_SA_KEY" > gcp_key.json
 
-    # 5️⃣  Commit & push any new files
-    - name: Commit offspring to repo
-      run: |
-        git config --global user.name  "evolve-bot"
-        git config --global user.email "actions@github.com"
-        git add .
-        git commit -m "genetic-run: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "nothing to commit"
-        git push || echo "nothing to push"
+      # 5 Generate new algos (“children”)
+      - name: Generate children
+        run: |
+          python tools/algogen/algo_gen.py \
+            --num_children "$NUM_CHILDREN"
 
-    # 6️⃣  Compile & back-test in Lean Cloud, store JSON in Firestore
-    - name: Back-test each new algo & store results
-      env:
-        GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-      run: |
-        python tools/algogen/backtest_and_store.py \
-          --project_id $QC_PROJECT_ID \
-          --qc_token  $QC_API_TOKEN \
-          --children  $NUM_CHILDREN
+      # 6 Iterate through children & run QC back-tests
+      - name: Run back-tests in the cloud
+        run: |
+          for child in outputs/*.py; do
+            echo "📤  Testing $child"
+            lean cloud backtest "$PROJECT_ID" --code "$child" \
+              --output backtest-results.json
+            python tools/algogen/store_results.py  # uploads the JSON
+          done
+
+      # 7 Pick the best-performing child (S6)
+      - name: Select generation winner
+        run: python tools/algogen/select_winner.py
+
+      # 8 Evolve parameters for next generation
+      - name: Evolve into next generation
+        run: |
+          python tools/algogen/evolve.py \
+            --num_children "$NUM_CHILDREN" \
+            --inherit_from firestore:evolve_state/parent
