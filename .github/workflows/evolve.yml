@@ -1,34 +1,45 @@
-# .github/workflows/evolve.yml
 name: evolve
 on:
-  workflow_dispatch:            # manual
-  schedule:                     # every 10 min
+  workflow_dispatch:
+  schedule:
     - cron: '*/10 * * * *'
 concurrency:
   group: evolve
   cancel-in-progress: true
 env:
-  NUM_CHILDREN: 5
+  # We now generate and test ONE child per workflow run for simplicity
+  NUM_CHILDREN: 1
   QC_PROJECT_ID: 23708106
   LEAN_CLI_VERSION: "2.5.0"
-  LEAN_CLOUD_TIMEOUT: 1200      # sec
+  LEAN_CLOUD_TIMEOUT: 1200
 jobs:
   evolve:
     runs-on: ubuntu-latest
     steps:
-      # ---- Step 0: checkout code -----------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ---- Step 1: spawn N child strategies ------------------------------
-      - name: Generate new child strategy
+      - name: Generate ONE new child strategy
+        id: generate
         run: |
-          python algo_gen.py --num $NUM_CHILDREN
-      # ---- Step 2: run QC cloud back-test --------------------------------
+          # Generate one child and capture its filename
+          CHILD_FILE=$(python algo_gen.py --num $NUM_CHILDREN | head -n 1)
+          echo "Generated child file: $CHILD_FILE"
+          # This sets the filename as an output for the next step
+          echo "child_file=$CHILD_FILE" >> $GITHUB_OUTPUT
+
+      - name: Prepare for Backtest
+        run: |
+          # Rename the generated child file to the standard 'params.json'
+          # so main.py can find it.
+          mv ${{ steps.generate.outputs.child_file }} params.json
+          echo "Prepared params.json for backtest."
+          cat params.json
+
       - name: Run back-test in Lean Cloud
         run: |
-          # Create a unique name for this backtest run
-          BACKTEST_NAME="Evolve-Run-${{ github.run_number }}-${{ env.NUM_CHILDREN }}-Children-$(date +%F-%H%M)"
+          # Name the backtest using parameters from the json file for easy identification
+          BACKTEST_NAME="Evolve-Run-${{ github.run_number }}-$(jq -r .STRATEGY_MODULE < params.json)-$(jq -r .SYMBOL < params.json)"
           echo "Starting backtest with name: $BACKTEST_NAME"
 
           lean cloud backtest "$QC_PROJECT_ID" \
@@ -36,26 +47,17 @@ jobs:
                --timeout $LEAN_CLOUD_TIMEOUT \
                --output backtest-results.json
         env:
-          LEAN_CLI_VERSION: ${{ env.LEAN_CLI_VERSION }}
           QC_PROJECT_ID:   ${{ env.QC_PROJECT_ID }}
 
-      # ---- Step 3: (results already downloaded by previous step) ---------
-      - name: Download results.json
-        run: |
-          echo "Results saved as backtest-results.json"
-      # ---- Step 4: store results in Firestore ----------------------------
       - name: Store results in Firestore
         run: |
+          # Add the params used for this run into the results file before storing
+          jq -s '.[0] * {params: .[1]}' backtest-results.json params.json > temp_results.json && mv temp_results.json backtest-results.json
           python store_results.py
         env:
           BACKTEST_ID: ${{ github.run_id }}
           GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
 
-      # ---- Step 5: evaluate vs champion ----------------------------------
-      - name: Evaluate candidate
+      - name: Evaluate and Select Champion
         run: |
           python select_winner.py
-      # ---- Step 6: promote if better -------------------------------------
-      - name: Promote new champion
-        run: |
-          python select_champion.py
