@@ -1,115 +1,126 @@
-name: evolve          # automatic genetic-style strategy search
+# =====================================================================
+#  GitHub Actions – Evolution loop
+#  -------------------------------------------------------------
+#  1.  generate-children   → create NUM_CHILDREN mutated algos
+#  2.  backtest-child      → run each child in QC Cloud + save stats
+#  3.  select-champion     → pick best performer & export DNA
+# =====================================================================
 
-# ────────────────────────────────
-# 1. Triggers
-# ────────────────────────────────
+name: evolve
+
 on:
-  workflow_dispatch:          # run manually from the Actions tab
-  schedule:                   # or run every 30 min
-    - cron: '*/30 * * * *'
+  workflow_dispatch:          # manual run button
+  schedule:
+    - cron: "*/30 * * * *"    # every 30 min
 
-# ────────────────────────────────
-# 2. Global defaults
-# ────────────────────────────────
+# ---------- Global constants -------------------------------------------------
 env:
-  # genetic exploration settings
-  NUM_CHILDREN: 6             # how many variants per generation
-  FAST_MIN: 5                 # SMA fast period search range
-  FAST_MAX: 25
-  SLOW_MIN: 30                # SMA slow period search range
-  SLOW_MAX: 60
+  NUM_CHILDREN:          5           # how many children each generation
+  MUTATION_RATE:         0.20        # 0 – 1  (20 % of params mutate)
+  QC_PROJECT_ID:         23708106    # QuantConnect project that holds the algo
+  PYTHON_VERSION:        "3.10"
 
-  # QuantConnect project ID (already exists in your QC org)
-  PROJECT_ID: 23708106
-
-# ────────────────────────────────
-# 3. Jobs
-# ────────────────────────────────
-
+# ------------------------ JOB 1 – generate children ------------------------ #
 jobs:
-
-  # ── J-1: Generate children code files ─────────────────────────────
-  generate:
+  generate-children:
     runs-on: ubuntu-latest
-
+    outputs:
+      child_matrix: ${{ steps.make-matrix.outputs.matrix }}
     steps:
-      - name: ⬇️  Checkout repo
-        uses: actions/checkout@v3
+    - name: ⬇️  Checkout repo
+      uses: actions/checkout@v3
 
-      - name: 🐍  Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+    - name: 🐍  Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: 📦  Install deps for algo_gen
-        run: pip install numpy
+    - name: 🔑  Write GCP key
+      run: echo "${{ secrets.GCP_SA_KEY }}" > gcp_key.json
 
-      - name: 🧬  Run algorithm generator
-        run: |
-          python tools/algo_gen.py \
-            --num $NUM_CHILDREN \
-            --fast-min $FAST_MIN --fast-max $FAST_MAX \
-            --slow-min $SLOW_MIN --slow-max $SLOW_MAX
+    - name: 🧬  Make NUM_CHILDREN mutated algos
+      run: |
+        python tools/algo_gen.py \
+          --num        "${NUM_CHILDREN}" \
+          --mutation   "${MUTATION_RATE}"
+        ls -1 children
 
-      # outputs/ now contains:
-      #   child_0.py … child_5.py
-      #   params_0.json … params_5.json
+    - name: 🔢  Build matrix JSON for next job
+      id: make-matrix
+      run: |
+        files=$(ls children | jq -R -s -c 'split("\n")[:-1] | map({"file": .})')
+        echo "matrix=$files" >> "$GITHUB_OUTPUT"
 
-  # ── J-2: One back-test per child (matrix) ─────────────────────────
+    - name: 📤  Upload children as artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: children
+        path: children/
+
+# ------------------------ JOB 2 – back-test each child --------------------- #
   backtest-child:
-    needs: generate
+    needs: generate-children
     runs-on: ubuntu-latest
-
     strategy:
+      fail-fast: false
       matrix:
-        idx: [0, 1, 2, 3, 4, 5]        #  NUM_CHILDREN slots
-
-    env:
-      CHILD_IDX: ${{ matrix.idx }}
-      PROJECT_ID: ${{ env.PROJECT_ID }}
+        include: ${{ fromJson(needs.generate-children.outputs.child_matrix) }}
 
     steps:
-      - name: ⬇️  Checkout repo
-        uses: actions/checkout@v3
+    - name: ⬇️  Checkout repo
+      uses: actions/checkout@v3
 
-      - name: 🐍  Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+    - name: 🔑  Write GCP key
+      run: echo "${{ secrets.GCP_SA_KEY }}" > gcp_key.json
 
-      - name: 💾  Install Lean CLI
-        run: pip install quantconnect-lean
+    - name: 📥  Pull child file for this matrix item
+      uses: actions/download-artifact@v3
+      with:
+        name: children
+        path: children
 
-      - name: 📑  Copy generated child code & params
-        run: |
-          mkdir -p strategy
-          cp outputs/child_${CHILD_IDX}.py strategy/main.py
-          cp outputs/params_${CHILD_IDX}.json params.json
+    - name: ⚙️  Install Lean CLI
+      run: pip install lean==1.1.143
 
-      - name: 🚀  Run cloud back-test
-        id: backtest
-        run: |
-          lean cloud backtest "$PROJECT_ID" \
-            --project-path strategy \
-            --name "auto_${CHILD_IDX}" \
-            --output backtest-results.json
+    - name: 🚀  Push & back-test in QC Cloud
+      run: |
+        CHILD="children/${{ matrix.file }}"
+        lean cloud push "$CHILD" --project $QC_PROJECT_ID
+        NAME=$(basename "$CHILD" .py)
+        lean cloud backtest $QC_PROJECT_ID \
+             --name "$NAME" \
+             --output backtest-results.json
 
-      - name: 🔎  Extract BACKTEST_ID from JSON
-        id: extract
-        run: |
-          BACKTEST_ID=$(jq -r '.backtest' backtest-results.json)
-          echo "id=$BACKTEST_ID" >> "$GITHUB_OUTPUT"
+    - name: 🗂  Store results in Firestore
+      run: |
+        BACKTEST_ID="$NAME-$(date +%s)"
+        python tools/store_results.py
+      env:
+        BACKTEST_ID: ${{ matrix.file }}
+        GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
 
-      # ── NEW: copy params.json so store_results picks it up
-      - name: 📨  Attach params.json
-        if: steps.backtest.outcome == 'success'
-        run: |
-          cp params.json params.json || true
+# ------------------------ JOB 3 – pick champion & commit DNA --------------- #
+  select-champion:
+    needs: backtest-child
+    runs-on: ubuntu-latest
 
-      - name: 🗄️  Store stats + params to Firestore
-        if: steps.backtest.outcome == 'success'
-        env:
-          BACKTEST_ID: ${{ steps.extract.outputs.id }}
-          GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
-        run: |
-          python tools/store_results.py
+    steps:
+    - name: ⬇️  Checkout repo
+      uses: actions/checkout@v3
+
+    - name: 🐍  Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 🔑  Write GCP key
+      run: echo "${{ secrets.GCP_SA_KEY }}" > gcp_key.json
+
+    - name: 🏆  Choose best doc & export params
+      run: python tools/select_champion.py
+
+    - name: 📤  Commit champion DNA back to repo
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "ci: update champion DNA"
+        file_pattern: champion.json
