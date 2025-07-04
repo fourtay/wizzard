@@ -1,89 +1,71 @@
+# .github/workflows/evolve.yml
 name: evolve
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */12 * * *"
+    # every 10 minutes
+    - cron: "*/10 * * * *"
 
 env:
   NUM_CHILDREN: 5
-  LEAN_PROJECT_ID: ${{ secrets.QC_PROJECT_ID }}
-  QC_TOKEN: ${{ secrets.QC_TOKEN }}
+  MUTATION_RATE: 0.2
+  CHAMPION_BRANCH: champion
+  PYTHON_VERSION: "3.10"
 
 jobs:
-  generate-children:
+  evolve:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: 3.10}
-      - run: python tools/algo_gen.py
-      - uses: actions/upload-artifact@v4
-        with: {name: children, path: children/}
 
-  backtest:
-    needs: generate-children
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: {child: [0,1,2,3,4]}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: {name: children}
-      - name: Run Lean cloud back-test
-        env: {LEAN_CLOUD_TOKEN: ${{ env.QC_TOKEN }}}
+      - name: 🧹  Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🐍  Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # 1️⃣  Generate a new candidate algorithm ---------------------------------
+      - name: ✨  Generate candidate
         run: |
-          CHILD_FILE="children/child_${{ matrix.child }}.json"
-          lean cloud backtest "${{ env.LEAN_PROJECT_ID }}" \
-               --inputs "$CHILD_FILE" \
-               --output backtest-results.json
-      - name: Store results
+          python scripts/algo_gen.py \
+            --children $NUM_CHILDREN \
+            --mutation $MUTATION_RATE
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # 2️⃣  Commit it back on a temp branch ------------------------------------
+      - name: 📤  Commit candidate
+        run: |
+          BRANCH="candidate-$(date +%s)"
+          git switch -c "$BRANCH"
+          git add algorithms/
+          git commit -m "🤖 new candidate"
+          git push origin "$BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3️⃣  Run backtest + store results --------------------------------------
+      - name: 🚀  Run backtest
+        run: |
+          lean cloud backtest "algorithms/candidate.py" --output backtest-results.json
+
+      - name: 🗄️  Store results in Firestore
+        run: python scripts/store_results.py
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: |
-          BACKTEST_ID=$(jq -r '.backtestId // .backtest.id' backtest-results.json)
-          export BACKTEST_ID
-          python tools/store_results.py
-      - name: Upload runStart marker
-        if: matrix.child == '0'
-        run: date --iso-8601=seconds > run_start.txt
-      - uses: actions/upload-artifact@v4
-        if: matrix.child == '0'
-        with: {name: run-start, path: run_start.txt}
+          BACKTEST_ID: ${{ github.run_id }}
 
-  select-champion:
-    needs: backtest
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: 3.10}
-      - uses: actions/download-artifact@v4
-        with: {name: run-start}
-      - name: Promote best child
+      # 4️⃣  Evaluate and (maybe) promote --------------------------------------
+      - name: 🏆  Evaluate vs champion
+        run: python scripts/evaluate.py
         env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          RUN_START: $(cat run-start/run_start.txt)
-        run: python tools/score_population.py
-      - name: Commit new champion
-        run: |
-          git config --global user.email "bot@github"
-          git config --global user.name  "Auto Evolve Bot"
-          if git diff --quiet champion.json; then
-            echo "No new champion"
-          else
-            git add champion.json && git commit -m "ci: promote new champion" && git push
-          fi
+          FIRESTORE_PROJECT: "YOUR_GCP_PROJECT_ID"
 
-  prune-firestore:           # <-- NEW JOB
-    needs: select-champion
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: 3.10}
-      - name: Prune old docs
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          KEEP_DAYS: 14
-          KEEP_LATEST: 200
-        run: python tools/prune_firestore.py
+      - name: ⬆️  Promote new champion if better
+        if: success() && steps.evaluate.outputs.promote == 'true'
+        run: |
+          git switch ${{ env.CHAMPION_BRANCH }}
+          git merge --no-ff "$BRANCH" -m "🏆 promote new champion"
+          git push origin ${{ env.CHAMPION_BRANCH }}
