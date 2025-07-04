@@ -1,4 +1,19 @@
 {
+  "STRATEGY_MODULE": {
+    "type": "choice",
+    "values": [
+      "ema_cross_strategy"
+    ]
+  },
+  "SYMBOL": {
+    "type": "choice",
+    "values": [
+      "SPY",
+      "QQQ",
+      "GLD",
+      "IWM"
+    ]
+  },
   "FAST_PERIOD": {
     "type": "int",
     "min": 5,
@@ -8,15 +23,5 @@
     "type": "int",
     "min": 60,
     "max": 200
-  },
-  "SYMBOL": {
-    "type": "choice",
-    "values": [
-      "SPY",
-      "QQQ",
-      "GLD",
-      "IWM",
-      "DIA"
-    ]
   }
 }
