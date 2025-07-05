@@ -2,18 +2,18 @@
 name: evolve
 
 on:
-  push:
-    branches: [main]      # auto-run on every commit to main
-  workflow_dispatch:      # manual trigger
-  schedule:
-    - cron: '*/10 * * * *'  # optional cron – remove if not needed
+  push:               # auto-run on every commit to main
+    branches: [main]
+  workflow_dispatch:  # manual “Run workflow” button
+  schedule:           # optional cron (remove if you don’t need it)
+    - cron: '*/10 * * * *'
 
 concurrency:
   group: evolve
   cancel-in-progress: true
 
 env:
-  NUM_CHILDREN: 5
+  NUM_CHILDREN: 1     # ▶️ generate ONE child only
 
 jobs:
   evolve:
@@ -38,12 +38,12 @@ jobs:
       - name: Lean login
         run: lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
-      - name: Generate children
+      - name: Generate child
         run: python algo_gen.py --num "$NUM_CHILDREN"
 
-      - name: Run back-tests
+      - name: Run back-test
         run: python run_backtest.py
 
-      # 🔒 Uncomment only after you add the GCP_SA_KEY secret
+      # Uncomment once you’ve added GCP_SA_KEY
       # - name: Evaluate results
       #   run: python select_winner.py
