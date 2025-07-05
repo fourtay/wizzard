@@ -7,11 +7,10 @@ concurrency:
   group: evolve
   cancel-in-progress: true
 env:
-  # We now generate and test ONE child per workflow run for simplicity
-  NUM_CHILDREN: 1
+  # Set the number of children to match your backtest nodes
+  NUM_CHILDREN: 5
   QC_PROJECT_ID: 23708106
   LEAN_CLI_VERSION: "2.5.0"
-  LEAN_CLOUD_TIMEOUT: 1200
 jobs:
   evolve:
     runs-on: ubuntu-latest
@@ -19,45 +18,20 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Generate ONE new child strategy
-        id: generate
-        run: |
-          # Generate one child and capture its filename
-          CHILD_FILE=$(python algo_gen.py --num $NUM_CHILDREN | head -n 1)
-          echo "Generated child file: $CHILD_FILE"
-          # This sets the filename as an output for the next step
-          echo "child_file=$CHILD_FILE" >> $GITHUB_OUTPUT
+      - name: Generate new child strategies
+        run: python algo_gen.py --num $NUM_CHILDREN
 
-      - name: Prepare for Backtest
-        run: |
-          # Rename the generated child file to the standard 'params.json'
-          # so main.py can find it.
-          mv ${{ steps.generate.outputs.child_file }} params.json
-          echo "Prepared params.json for backtest."
-          cat params.json
-
-      - name: Run back-test in Lean Cloud
-        run: |
-          # Name the backtest using parameters from the json file for easy identification
-          BACKTEST_NAME="Evolve-Run-${{ github.run_number }}-$(jq -r .STRATEGY_MODULE < params.json)-$(jq -r .SYMBOL < params.json)"
-          echo "Starting backtest with name: $BACKTEST_NAME"
-
-          lean cloud backtest "$QC_PROJECT_ID" \
-               --name "$BACKTEST_NAME" \
-               --timeout $LEAN_CLOUD_TIMEOUT \
-               --output backtest-results.json
-        env:
-          QC_PROJECT_ID:   ${{ env.QC_PROJECT_ID }}
-
+      - name: Run back-tests in parallel
+        run: python scripts/run_parallel_backtests.py
+      
       - name: Store results in Firestore
-        run: |
-          # Add the params used for this run into the results file before storing
-          jq -s '.[0] * {params: .[1]}' backtest-results.json params.json > temp_results.json && mv temp_results.json backtest-results.json
-          python store_results.py
+        run: python store_results.py
         env:
-          BACKTEST_ID: ${{ github.run_id }}
-          GCP_SA_KEY:  ${{ secrets.GCP_SA_KEY }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
 
       - name: Evaluate and Select Champion
+        # Add a short delay to ensure data is consistent in Firestore
         run: |
+          echo "Waiting 30 seconds for data consistency..."
+          sleep 30
           python select_winner.py
