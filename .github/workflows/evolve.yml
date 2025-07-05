@@ -38,8 +38,8 @@ jobs:
       run: |
         rm -f lean.json
         rm -rf qc_root || true
-        # initialise Lean for *this* org; non-interactive
-        lean init --organization "$QC_ORG_ID" --yes
+        # initialise Lean for this org, auto-confirm with -y
+        lean init --organization "$QC_ORG_ID" -y
         # log in
         lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
