@@ -4,8 +4,7 @@
 Launch exactly one (NUM_CHILDREN = 1) cloud back-test.
 
 Steps
-  1. copy lean.json, main.py, strategies/ into children/* so each folder is a
-     self-contained Lean project
+  1. ensure each child folder is a self-contained Lean project
   2. run `lean cloud backtest` from INSIDE that folder
   3. store {run_name: backtestId} in backtests.json (best-effort)
 
@@ -23,8 +22,7 @@ PROJECT_ID = os.getenv("QC_PROJECT_ID")
 if not PROJECT_ID:
     sys.exit("QC_PROJECT_ID env var missing")
 
-# ← added lean.json here
-ESSENTIALS = ["lean.json", "main.py", "strategies"]
+ESSENTIALS = ["main.py", "strategies"]        # ⬅ lean.json removed
 BACKTEST_RE = re.compile(r"backtest.*?id.*?([0-9a-f\-]{8,})", re.I)
 
 records: dict[str, str] = {}
@@ -39,6 +37,12 @@ for child in CHILD_DIR.iterdir():
         if dst.exists():
             shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
         shutil.copytree(src, dst) if src.is_dir() else shutil.copy2(src, dst)
+
+    # If lean.json missing, generate it on the fly
+    if not (child / "lean.json").exists():
+        subprocess.run(
+            ["lean", "init", "-y"], cwd=child, check=True, text=True
+        )
 
     # 2️⃣  start back-test (CLI 1.x ⇒ no --wait / --json flags)
     run_name = f"{child.name}-{uuid.uuid4().hex[:6]}"
