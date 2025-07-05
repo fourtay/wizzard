@@ -1,67 +1,62 @@
+# ─────────────────────────  .github/workflows/evolve.yml  ─────────────────────────
 name: evolve
 
-# ─── 1. WHEN TO RUN ────────────────────────────────────────────────────────────
+#--- What kicks the workflow off
 on:
-  push:
+  push:               # every push to main
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch:  # manual “Run workflow” button
 
-# ─── 2. GLOBAL ENV VARS (secrets in repo-settings ▸ Actions) ───────────────────
+#--- Environment variables (pulled from your GitHub Secrets)
 env:
   NUM_CHILDREN: 1
-  QC_USER_ID:   ${{ secrets.QC_USER_ID }}
-  QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
-  QC_ORG_ID:    ${{ secrets.QC_ORG_ID }}    # ← NEW, you added this secret
-  GCP_SA_KEY:   ${{ secrets.GCP_SA_KEY }}
+  QC_USER_ID:    ${{ secrets.QC_USER_ID }}
+  QC_API_TOKEN:  ${{ secrets.QC_API_TOKEN }}
+  QC_PROJECT_ID: ${{ secrets.QC_PROJECT_ID }}
+  QC_ORG_ID:     ${{ secrets.QC_ORG_ID }}   # <- you created this secret
+  GCP_SA_KEY:    ${{ secrets.GCP_SA_KEY }}
 
-# ─── 3. JOB ────────────────────────────────────────────────────────────────────
+#--- Single job
 jobs:
   evolve:
     runs-on: ubuntu-latest
 
     steps:
-    # ── checkout & python ──────────────────────────────────────────────────────
+    # 1. checkout repo
     - name: Check out source
       uses: actions/checkout@v4
 
+    # 2. python
     - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
         python-version: "3.11"
 
+    # 3. deps + Lean CLI
     - name: Install requirements + Lean CLI
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install "lean==1.0.219"
 
-    # ── fresh Lean root each run ───────────────────────────────────────────────
-    - name: Prepare Lean root
+    # 4. create a fresh Lean config tied to *your* organisation
+    - name: Prepare Lean root (fresh lean.json)
       run: |
-        rm -rf qc_root             # start totally clean
-        mkdir  qc_root
-        cd     qc_root
-
-        # initialise a brand-new Lean config bound to your organisation
+        rm -f lean.json                            # wipe any stale config
+        # initialise Lean for this org (non-interactive)
         lean init --organization-id "$QC_ORG_ID" --yes
-
         # authenticate
         lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
-    # ── run helper scripts inside qc_root ──────────────────────────────────────
+    # 5. evolve …
     - name: Generate child algorithm
-      run: |
-        cd qc_root
-        python ../algo_gen.py --num "$NUM_CHILDREN"
+      run: python algo_gen.py --num "$NUM_CHILDREN"
 
     - name: Run back-test
-      run: |
-        cd qc_root
-        python ../run_backtest.py
+      run: python run_backtest.py
 
     - name: Select best result
       env:
         GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GCP_SA_KEY }}
-      run: |
-        cd qc_root
-        python ../select_winner.py
+      run: python select_winner.py
+# ───────────────────────────────────────────────────────────────────────────────────
