@@ -1,55 +1,55 @@
+# algo_gen.py
 #!/usr/bin/env python3
-"""Generate N children by mutating a parent param-dict using schema bounds.
-Reads schema from parameter_schema.json and writes JSON files to children/.
 """
-import json, random, os, argparse, pathlib, hashlib
+Generate N mutated parameter sets based on parameter_schema.json
+Each set is placed in its own folder inside `children/` as params.json
+"""
 
-SCHEMA = json.load(open(pathlib.Path(__file__).parent / "parameter_schema.json"))
+from __future__ import annotations
+import argparse, hashlib, json, os, pathlib, random
 
-def random_value(field):
-    """
-    Generates a random value for a given field based on its type in the schema.
-    """
-    field_type = SCHEMA[field]["type"]
+ROOT   = pathlib.Path(__file__).resolve().parent
+SCHEMA = json.load(open(ROOT / "parameter_schema.json"))
 
-    # --- THIS IS THE NEW LOGIC TO FIX THE ERROR ---
-    if field_type == "choice":
-        return random.choice(SCHEMA[field]["values"])
-    # ---------------------------------------------
+def random_value(field: str):
+    spec = SCHEMA[field]
+    if spec["type"] == "choice":
+        return random.choice(spec["values"])
+    if spec["type"] == "int":
+        return random.randint(spec["min"], spec["max"])
+    return round(random.uniform(spec["min"], spec["max"]), 4)
 
-    if field_type == "int":
-        mn, mx = SCHEMA[field]["min"], SCHEMA[field]["max"]
-        return random.randint(mn, mx)
-
-    # Default to float if not specified otherwise
-    mn, mx = SCHEMA[field]["min"], SCHEMA[field]["max"]
-    return round(random.uniform(mn, mx), 4)
-
-def mutate(parent):
+def mutate(parent: dict[str, object]) -> dict[str, object]:
     child = parent.copy()
-    # mutate 30% of the fields
-    for f in random.sample(list(SCHEMA.keys()), k=max(1, int(0.3 * len(SCHEMA)))):
+    fields = random.sample(list(SCHEMA), k=max(1, int(0.3 * len(SCHEMA))))
+    for f in fields:
         child[f] = random_value(f)
     return child
 
-def load_parent(pth):
-    if not os.path.exists(pth):                 # bootstrap: random parent
-        return {f: random_value(f) for f in SCHEMA}
-    return json.load(open(pth))
-
-if __name__ == "__main__":
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--parent",  default="parent_params.json")
-    ap.add_argument("--num",     type=int, default=int(os.getenv("NUM_CHILDREN", 5)))
-    ap.add_argument("--outdir",  default="children")
+    ap.add_argument("--parent", default="parent_params.json")
+    ap.add_argument("--num", type=int, default=int(os.getenv("NUM_CHILDREN", 5)))
+    ap.add_argument("--outdir", default="children")
     args = ap.parse_args()
 
-    parent = load_parent(args.parent)
-    os.makedirs(args.outdir, exist_ok=True)
+    # load parent or create one if it doesn't exist
+    parent_path = ROOT / args.parent
+    parent = (json.load(open(parent_path))
+              if parent_path.exists()
+              else {f: random_value(f) for f in SCHEMA})
+
+    outdir = ROOT / args.outdir
+    outdir.mkdir(exist_ok=True)
 
     for i in range(args.num):
         child = mutate(parent)
-        h = hashlib.md5(json.dumps(child, sort_keys=True).encode()).hexdigest()[:8]
-        fn = f"{args.outdir}/child_{i}_{h}.json"
-        json.dump(child, open(fn, "w"), indent=2)
-        print(fn)
+        hash8 = hashlib.md5(json.dumps(child, sort_keys=True)
+                            .encode()).hexdigest()[:8]
+        d = outdir / f"child_{i}_{hash8}"
+        d.mkdir(exist_ok=True)
+        json.dump(child, open(d / "params.json", "w"), indent=2)
+        print(f"🧬  Wrote {d}")
+
+if __name__ == "__main__":
+    main()
