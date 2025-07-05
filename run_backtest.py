@@ -1,41 +1,48 @@
+# run_backtest.py
 #!/usr/bin/env python3
 """
-For every folder in wizard/children/, start a cloud back-test and
-store QC 'backtestId' in backtests.json so we can poll later.
-
-Requires env var:
-  • QC_API_TOKEN
+Kick off a cloud back-test for every sub-folder in `children/`
+and record the QC backtest IDs in backtests.json.
 """
-import os, json, subprocess, pathlib
 
-QC_TOKEN = os.getenv("QC_API_TOKEN")
-assert QC_TOKEN, "QC_API_TOKEN not set"
+from __future__ import annotations
+import json, os, pathlib, subprocess, sys
 
-CHILD_DIR = pathlib.Path(__file__).parent / "children"
-OUT_F     = pathlib.Path(__file__).parent / "backtests.json"
-PROJECT_ID = "23708106"        # ← your QC project ID
+ROOT       = pathlib.Path(__file__).resolve().parent
+CHILD_DIR  = ROOT / "children"
+OUT_FILE   = ROOT / "backtests.json"
+QC_TOKEN   = os.getenv("QC_API_TOKEN")
+PROJECT_ID = os.getenv("QC_PROJECT_ID")
 
-records = {}
+if not (QC_TOKEN and PROJECT_ID):
+    sys.exit("QC_API_TOKEN and/or QC_PROJECT_ID env vars are missing.")
+
+records: dict[str, str] = {}
+
 for child in CHILD_DIR.iterdir():
     if not child.is_dir():
         continue
-    print(f"🚀  launching {child.name}")
+    print(f"🚀  Launching back-test → {child.name}")
     cmd = [
-        "lean", "cloud", "backtest", str(PROJECT_ID),
-        "--push", str(child),
-        "--name", child.name,
-        "--wait", "--output", str(child / "backtest.json"),
-        "--json", "--token", QC_TOKEN,
+        "lean", "cloud", "backtest", PROJECT_ID,
+        "--push",   str(child),
+        "--name",   child.name,
+        "--wait",
+        "--output", str(child / "backtest.json"),
     ]
-    res = subprocess.run(cmd, text=True, capture_output=True)
-    if res.returncode != 0:
-        print("❌  QC error:", res.stderr.strip())
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    if proc.returncode:
+        print(f"❌  {child.name}: {proc.stderr.strip()}")
         continue
-    # lean prints json when --json; parse id
-    payload = json.loads(res.stdout)
-    bt_id = payload["backtestId"]
-    records[child.name] = bt_id
 
-with open(OUT_F, "w") as f:
-    json.dump(records, f, indent=2)
-print(f"💾 wrote {OUT_F}")
+    try:
+        bt_id = json.loads((child / "backtest.json").read_text())["backtestId"]
+    except Exception as e:
+        print(f"⚠️   Could not read backtestId for {child.name}: {e}")
+        continue
+
+    records[child.name] = bt_id
+    print(f"✔   {child.name}  →  {bt_id}")
+
+OUT_FILE.write_text(json.dumps(records, indent=2))
+print(f"📝  Back-test IDs saved to {OUT_FILE.relative_to(ROOT)}")
