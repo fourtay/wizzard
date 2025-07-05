@@ -1,10 +1,11 @@
     - name: Prepare fresh Lean root
       run: |
-        rm -f lean.json                     # scrub any legacy config
-        rm -rf data-folder .local || true   # scrub old folders
+        # ── wipe anything left from a previous run ───────────────────────────
+        rm -f lean.json
+        rm -rf data-folder .local || true
 
-        # write a minimal, non-interactive config ──► **THIS was missing**
-        cat > lean.json <<EOF
+        # ── create a minimal Lean config (this is the bit that was missing) ─
+        cat > lean.json <<'EOF'
         {
           "organization": "${QC_ORG_ID}",
           "default-language": "python"
