@@ -1,4 +1,12 @@
-{
-  "version": 1,
-  "organizationId": "ORG-xxxxxxxxxxxx"
-}
+    - name: Prepare fresh Lean root
+      run: |
+        rm -f lean.json                     # scrub any legacy config
+        rm -rf data-folder .local || true   # scrub old folders
+
+        # write a minimal, non-interactive config ──► **THIS was missing**
+        cat > lean.json <<EOF
+        {
+          "organization": "${QC_ORG_ID}",
+          "default-language": "python"
+        }
+        EOF
