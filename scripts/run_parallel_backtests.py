@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
 Orchestrates running multiple backtests in parallel on QuantConnect.
-
-This script finds all generated child parameter files, creates isolated directories
-for each, and launches a Lean cloud backtest for each one using subprocess.
-
-It captures the `backtestId` from each run and saves them to `backtests.json`.
 """
 import os
+import sys
 import json
 import subprocess
 import pathlib
@@ -21,13 +17,20 @@ TMP_DIR = ROOT / ".tmp_children"
 def main():
     """Main execution function."""
     # --- THIS IS THE FIX ---
-    # Find the full path to the lean executable to ensure the subprocess can find it.
+    # Find the full path to the lean executable.
     lean_executable = shutil.which("lean")
     if not lean_executable:
-        print("❌ Critical Error: 'lean' executable not found in PATH.")
-        print("   Please ensure the LEAN CLI is installed and accessible.")
+        print("❌ Critical Error: 'lean' executable not found.")
         sys.exit(1)
     print(f"✅ Found lean executable at: {lean_executable}")
+
+    # Get QC credentials from environment variables set by the workflow
+    try:
+        qc_user_id = os.environ["QC_USER_ID"]
+        qc_api_token = os.environ["QC_API_TOKEN"]
+    except KeyError as e:
+        print(f"❌ Critical Error: Missing secret {e}. Ensure it's set in the workflow env.")
+        sys.exit(1)
     # --- END FIX ---
 
     if not CHILDREN_DIR.exists():
@@ -53,28 +56,26 @@ def main():
         child_dir = TMP_DIR / child_id
         child_dir.mkdir()
 
-        # Copy necessary source files to the isolated directory
+        # Copy necessary source files
         shutil.copy(ROOT / "main.py", child_dir)
         shutil.copy(ROOT / "parameter_schema.json", child_dir)
         shutil.copytree(ROOT / "strategies", child_dir / "strategies")
         shutil.copy(child_json, child_dir / "params.json")
 
-        # Construct a unique name for the backtest
         params = json.load(open(child_dir / "params.json"))
-        strategy_module = params.get("STRATEGY_MODULE", "unknown")
-        symbol = params.get("SYMBOL", "unknown")
-        backtest_name = f"Evolve-{child_id}-{strategy_module}-{symbol}"
+        backtest_name = f"Evolve-{child_id}-{params.get('STRATEGY_MODULE', 'n/a')}-{params.get('SYMBOL', 'n/a')}"
 
-        # Command to run the backtest using the full path to the lean CLI
+        # Build the command with explicit authentication for robustness
         cmd = [
             lean_executable, "cloud", "backtest", str(child_dir),
             "--name", backtest_name,
             "--json",
-            "--no-output"
+            "--no-output",
+            "--user-id", qc_user_id,
+            "--api-token", qc_api_token
         ]
         
         print(f"  -> Launching: {backtest_name}")
-        # Launch the backtest process in the background
         proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         processes.append((child_id, proc))
 
