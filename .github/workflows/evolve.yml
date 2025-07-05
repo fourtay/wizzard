@@ -1,54 +1,48 @@
+# .github/workflows/evolve.yml
 name: evolve
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/10 * * * *'   # every 10 min (adjust as you like)
+
 concurrency:
   group: evolve
   cancel-in-progress: true
+
 env:
   NUM_CHILDREN: 5
-  QC_PROJECT_ID: 23708106
   LEAN_CLI_VERSION: "2.5.0"
+
 jobs:
   evolve:
     runs-on: ubuntu-latest
-    
-    # Define secrets here to make them available to all steps
     env:
-      QC_USER_ID: ${{ secrets.QC_USER_ID }}
-      QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
-      GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      QC_PROJECT_ID: ${{ secrets.QC_PROJECT_ID }}
+      QC_USER_ID:    ${{ secrets.QC_USER_ID }}
+      QC_API_TOKEN:  ${{ secrets.QC_API_TOKEN }}
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install lean
+          pip install "lean==${LEAN_CLI_VERSION}"
 
-      - name: Authenticate LEAN CLI
+      - name: Authenticate Lean CLI
         run: lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
-      - name: Generate new child strategies
-        run: python algo_gen.py --num $NUM_CHILDREN
+      - name: Generate candidate children
+        run: python algo_gen.py --num "$NUM_CHILDREN"
 
-      - name: Run back-tests in parallel
-        run: python scripts/run_parallel_backtests.py
-      
-      - name: Store results in Firestore
-        run: python store_results.py
+      - name: Run back-tests
+        run: python run_backtest.py
 
-      - name: Evaluate and Select Champion
-        run: |
-          echo "Waiting 60 seconds for results to populate in Firestore..."
-          sleep 60
-          python select_winner.py
+      - name: Evaluate results
+        run: python select_winner.py
