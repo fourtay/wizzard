@@ -1,110 +1,104 @@
 #!/usr/bin/env python3
 """
 store_results.py
-----------------
-Reads Lean’s back-test JSON (backtest-results.json) and pushes the key
-statistics + charts to Google Firestore.
-
-• Expects the following env vars (already set by the workflow):
-    - BACKTEST_ID   – document id to use in the collection
-    - GCP_SA_KEY    – service-account JSON (base64-safe string)
-
-• Firestore collection: backtest_results
+Reads `backtests.json` to get a list of backtest IDs, fetches the full
+results for each from the QuantConnect API, and pushes them to Google Firestore.
 """
-
 import json
 import os
 import sys
+import time
+import requests
+import hashlib
 from pathlib import Path
-
 from google.cloud import firestore
 
-# ── Settings ──────────────────────────────────────────────────────────────
-RESULTS_FILE_PATH = Path("backtest-results.json")
+# --- Settings ---
+BACKTESTS_FILE_PATH = Path("backtests.json")
+PARAMS_DIR = Path(".tmp_children")
 
-# ── Grab secrets ──────────────────────────────────────────────────────────
+# --- Grab QC secrets ---
 try:
-    GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
-    BACKTEST_ID = os.environ["BACKTEST_ID"]
+    QC_USER_ID = os.environ["QC_USER_ID"]
+    QC_API_TOKEN = os.environ["QC_API_TOKEN"]
 except KeyError as missing:
-    print(f"❌  Required env var not set: {missing.args[0]}")
+    print(f"❌ Required QuantConnect secret not set: {missing.args[0]} (Set in GitHub Secrets)")
     sys.exit(1)
 
-# ── Firestore auth ────────────────────────────────────────────────────────
+# --- Firestore auth ---
 try:
+    GCP_SA_KEY_JSON = os.environ["GCP_SA_KEY"]
     with open("gcp_key.json", "w") as fh:
         fh.write(GCP_SA_KEY_JSON)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "gcp_key.json"
     db = firestore.Client()
-    print("✅  Firestore ready")
+    print("✅ Firestore ready")
+except KeyError as missing:
+    print(f"❌ Required env var not set: {missing.args[0]}")
+    sys.exit(1)
 except Exception as exc:
-    print(f"❌  Firestore auth failed: {exc}")
+    print(f"❌ Firestore auth failed: {exc}")
     sys.exit(1)
 
-# ── Load JSON ─────────────────────────────────────────────────────────────
-print("📖  Parsing backtest JSON …")
-if not RESULTS_FILE_PATH.exists():
-    print(f"❌  {RESULTS_FILE_PATH} not found")
-    sys.exit(1)
-
-try:
-    results_json = json.loads(RESULTS_FILE_PATH.read_text())
-except json.JSONDecodeError as exc:
-    print(f"❌  Invalid JSON: {exc}")
-    sys.exit(1)
-
-# ── Helpers to locate statistics / charts anywhere in the tree ───────────
-def find_stats(node: dict):
-    """Depth-first search for the statistics dict, no matter where Lean put it."""
-    if not isinstance(node, dict):
+def get_backtest_results(backtest_id: str) -> dict:
+    """Fetches a single backtest result from the QC API."""
+    timestamp = str(int(time.time()))
+    signature = hashlib.sha256(f"{QC_API_TOKEN}:{timestamp}".encode()).hexdigest()
+    headers = {"Accept": "application/json", "Timestamp": timestamp}
+    auth = (QC_USER_ID, signature)
+    
+    response = requests.post(
+        "https://www.quantconnect.com/api/v2/backtests/read",
+        json={"backtestId": backtest_id},
+        headers=headers,
+        auth=auth,
+    )
+    if response.status_code != 200:
+        print(f"  -> Failed to fetch {backtest_id}: {response.text}")
         return None
-    # Heuristic: a real stats block contains several well-known keys
-    REQUIRED_KEYS = {"Total Fees", "Net Profit", "Sharpe Ratio"}
-    if REQUIRED_KEYS.intersection(node.keys()) and len(node) > 5:
-        return node
-    for v in node.values():
-        if isinstance(v, dict):
-            found = find_stats(v)
-            if found:
-                return found
-    return None
-
-def find_charts(node: dict):
-    if not isinstance(node, dict):
+        
+    data = response.json()
+    if not data.get("success"):
+        print(f"  -> API call for {backtest_id} unsuccessful: {data}")
         return None
-    if "charts" in node and isinstance(node["charts"], dict):
-        return node["charts"]
-    for v in node.values():
-        if isinstance(v, dict):
-            found = find_charts(v)
-            if found is not None:
-                return found
-    return {}
+        
+    return data
 
-statistics = find_stats(results_json)
-charts      = find_charts(results_json) or {}
+# --- Main Logic ---
+if not BACKTESTS_FILE_PATH.exists():
+    print(f"🤷 {BACKTESTS_FILE_PATH} not found. Nothing to store.")
+    sys.exit(0)
 
-if not statistics:
-    print("❌  statistics block missing")
-    print("Top-level keys:", list(results_json.keys()))
-    sys.exit(1)
+with open(BACKTESTS_FILE_PATH) as f:
+    backtests_to_fetch = json.load(f)
 
-# Back-test name, if present
-name = (
-    results_json.get("name")
-    or results_json.get("backtest", {}).get("name")
-    or "Unnamed Backtest"
-)
+print(f"Found {len(backtests_to_fetch)} backtests to process.")
 
-# ── Upload ────────────────────────────────────────────────────────────────
-payload = {
-    "name": name,
-    "createdAt": firestore.SERVER_TIMESTAMP,
-    "statistics": statistics,
-    "charts": charts,
-}
+for child_id, backtest_id in backtests_to_fetch.items():
+    print(f"--- Processing {child_id} (ID: {backtest_id}) ---")
+    results_json = get_backtest_results(backtest_id)
+    if not results_json:
+        continue
 
-print(f"⬆️  Uploading document {BACKTEST_ID} …")
-doc_ref = db.collection("backtest_results").document(BACKTEST_ID)
-doc_ref.set(payload)
-print("✅  Successfully uploaded backtest results to Firestore!")
+    # Load the parameters used for this specific run
+    params_path = PARAMS_DIR / child_id / "params.json"
+    try:
+        with open(params_path) as f:
+            params = json.load(f)
+    except FileNotFoundError:
+        print(f"  -> WARNING: Could not find params file at {params_path}")
+        params = {}
+
+    # Structure the payload for Firestore
+    payload = {
+        "name": results_json.get("name", "Unnamed Backtest"),
+        "createdAt": firestore.SERVER_TIMESTAMP,
+        "statistics": results_json.get("statistics", {}),
+        "charts": results_json.get("charts", {}),
+        "params": params  # Include the parameters that generated this result
+    }
+
+    print(f"  -> Uploading document {backtest_id}…")
+    db.collection("backtest_results").document(backtest_id).set(payload)
+
+print("\n✅ Successfully processed all backtests.")
