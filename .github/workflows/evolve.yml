@@ -2,9 +2,16 @@
 name: evolve
 
 on:
+  # 🔁 run on every commit to main
+  push:
+    branches: [main]
+
+  # 🛠️ manual trigger button
   workflow_dispatch:
+
+  # 🕒 optional cron (every 10 min) – delete if you don’t want it
   schedule:
-    - cron: '*/10 * * * *'   # every 10 min; adjust as you wish
+    - cron: '*/10 * * * *'
 
 concurrency:
   group: evolve
@@ -32,7 +39,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # ✅ Lean CLI – use any stable 1.x release
+          # Lean CLI – any stable 1.x release
           pip install "lean>=1.0,<2.0"
 
       - name: Authenticate Lean CLI
@@ -44,5 +51,6 @@ jobs:
       - name: Run back-tests
         run: python run_backtest.py
 
+      # ⚠️  Remove or comment-out this step if you haven’t added GCP_SA_KEY yet
       - name: Evaluate results
         run: python select_winner.py
