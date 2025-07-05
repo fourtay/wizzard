@@ -2,23 +2,18 @@
 name: evolve
 
 on:
-  # 🔁 run on every commit to main
   push:
-    branches: [main]
-
-  # 🛠️ manual trigger button
-  workflow_dispatch:
-
-  # 🕒 optional cron (every 10 min) – delete if you don’t want it
+    branches: [main]      # auto-run on every commit to main
+  workflow_dispatch:      # manual trigger
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/10 * * * *'  # optional cron – remove if not needed
 
 concurrency:
   group: evolve
   cancel-in-progress: true
 
 env:
-  NUM_CHILDREN: 5            # how many variants algo_gen.py creates
+  NUM_CHILDREN: 5
 
 jobs:
   evolve:
@@ -32,25 +27,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+        with: { python-version: '3.11' }
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Lean CLI – any stable 1.x release
           pip install "lean>=1.0,<2.0"
 
-      - name: Authenticate Lean CLI
+      - name: Lean login
         run: lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
-      - name: Generate candidate children
+      - name: Generate children
         run: python algo_gen.py --num "$NUM_CHILDREN"
 
       - name: Run back-tests
         run: python run_backtest.py
 
-      # ⚠️  Remove or comment-out this step if you haven’t added GCP_SA_KEY yet
-      - name: Evaluate results
-        run: python select_winner.py
+      # 🔒 Uncomment only after you add the GCP_SA_KEY secret
+      # - name: Evaluate results
+      #   run: python select_winner.py
