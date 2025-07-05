@@ -1,4 +1,4 @@
-# ──────────────────────  .github/workflows/evolve.yml  ──────────────────────
+# ───────────── .github/workflows/evolve.yml ─────────────
 name: evolve
 
 on:
@@ -33,13 +33,12 @@ jobs:
         pip install -r requirements.txt
         pip install "lean==1.0.219"
 
-    # ── fresh Lean root tied to your organisation ──
+    # ── fresh Lean root tied to your org ──
     - name: Prepare Lean root (fresh lean.json)
       run: |
         rm -f lean.json
-        rm -rf qc_root || true
-        # initialise Lean for this org, auto-confirm with -y
-        lean init --organization "$QC_ORG_ID" -y
+        # non-interactive init for this org
+        lean init --organization "$QC_ORG_ID" --ci
         # log in
         lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
@@ -53,4 +52,4 @@ jobs:
       env:
         GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GCP_SA_KEY }}
       run: python select_winner.py
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────
