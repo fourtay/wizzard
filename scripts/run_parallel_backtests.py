@@ -20,6 +20,16 @@ TMP_DIR = ROOT / ".tmp_children"
 
 def main():
     """Main execution function."""
+    # --- THIS IS THE FIX ---
+    # Find the full path to the lean executable to ensure the subprocess can find it.
+    lean_executable = shutil.which("lean")
+    if not lean_executable:
+        print("❌ Critical Error: 'lean' executable not found in PATH.")
+        print("   Please ensure the LEAN CLI is installed and accessible.")
+        sys.exit(1)
+    print(f"✅ Found lean executable at: {lean_executable}")
+    # --- END FIX ---
+
     if not CHILDREN_DIR.exists():
         print(f"❌ Children directory not found at: {CHILDREN_DIR}")
         return
@@ -55,12 +65,12 @@ def main():
         symbol = params.get("SYMBOL", "unknown")
         backtest_name = f"Evolve-{child_id}-{strategy_module}-{symbol}"
 
-        # Command to run the backtest using the lean CLI
+        # Command to run the backtest using the full path to the lean CLI
         cmd = [
-            "lean", "cloud", "backtest", str(child_dir),
+            lean_executable, "cloud", "backtest", str(child_dir),
             "--name", backtest_name,
-            "--json",  # Output results as JSON to capture the backtestId
-            "--no-output" # Don't save the full results.json here
+            "--json",
+            "--no-output"
         ]
         
         print(f"  -> Launching: {backtest_name}")
@@ -85,7 +95,7 @@ def main():
             except json.JSONDecodeError:
                 print(f"  ❌ {child_id} -> Failed to decode JSON from output: {stdout}")
         else:
-            print(f"  ❌ {child_id} -> Process failed with error: {stderr}")
+            print(f"  ❌ {child_id} -> Process failed with error: {stderr.strip()}")
 
     # Save the mapping of child names to backtest IDs
     with open("backtests.json", "w") as f:
