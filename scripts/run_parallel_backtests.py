@@ -51,6 +51,7 @@ def main():
         child_dir = TMP_DIR / child_id
         child_dir.mkdir()
 
+        # Copy necessary source files
         shutil.copy(ROOT / "main.py", child_dir)
         shutil.copy(ROOT / "parameter_schema.json", child_dir)
         shutil.copytree(ROOT / "strategies", child_dir / "strategies")
@@ -59,8 +60,7 @@ def main():
         params = json.load(open(child_dir / "params.json"))
         backtest_name = f"Evolve-{child_id}-{params.get('STRATEGY_MODULE', 'n/a')}-{params.get('SYMBOL', 'n/a')}"
 
-        # --- THIS IS THE FIX ---
-        # Add the --verbose flag to get detailed logs from the LEAN CLI
+        # Build the command with the --verbose flag for detailed debugging
         cmd = [
             lean_executable, "cloud", "backtest", str(child_dir),
             "--name", backtest_name,
@@ -70,7 +70,6 @@ def main():
             "--api-token", qc_api_token,
             "--verbose"
         ]
-        # --- END FIX ---
         
         print(f"  -> Launching: {backtest_name}")
         proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
