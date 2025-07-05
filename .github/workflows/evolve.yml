@@ -1,9 +1,26 @@
+name: evolve
+
+# ─── 1. WHEN TO RUN ────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+# ─── 2. GLOBAL ENV VARS (secrets in repo-settings ▸ Actions) ───────────────────
+env:
+  NUM_CHILDREN: 1
+  QC_USER_ID:   ${{ secrets.QC_USER_ID }}
+  QC_API_TOKEN: ${{ secrets.QC_API_TOKEN }}
+  QC_ORG_ID:    ${{ secrets.QC_ORG_ID }}    # ← NEW, you added this secret
+  GCP_SA_KEY:   ${{ secrets.GCP_SA_KEY }}
+
+# ─── 3. JOB ────────────────────────────────────────────────────────────────────
 jobs:
   evolve:
     runs-on: ubuntu-latest
 
     steps:
-    # 1 ▸  checkout & python
+    # ── checkout & python ──────────────────────────────────────────────────────
     - name: Check out source
       uses: actions/checkout@v4
 
@@ -18,22 +35,20 @@ jobs:
         pip install -r requirements.txt
         pip install "lean==1.0.219"
 
-    # 2 ▸  create a *fresh* Lean root for this run
+    # ── fresh Lean root each run ───────────────────────────────────────────────
     - name: Prepare Lean root
       run: |
-        rm -rf qc_root             # start totally clean each run
+        rm -rf qc_root             # start totally clean
         mkdir  qc_root
         cd     qc_root
 
-        # fresh, non-interactive init bound to **your org**
-        lean init \
-          --organization-id "$QC_ORG_ID" \
-          --yes
+        # initialise a brand-new Lean config bound to your organisation
+        lean init --organization-id "$QC_ORG_ID" --yes
 
         # authenticate
         lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
-    # 3 ▸  run your helper scripts *inside* qc_root
+    # ── run helper scripts inside qc_root ──────────────────────────────────────
     - name: Generate child algorithm
       run: |
         cd qc_root
