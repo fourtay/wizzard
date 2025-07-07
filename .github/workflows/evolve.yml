@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # ───────────────────────────────────────────────
     - name: Check out source
       uses: actions/checkout@v4
 
@@ -33,15 +34,14 @@ jobs:
         pip install -r requirements.txt
         pip install "lean==1.0.219"
 
-    # ── fresh Lean root tied to your org ──
+    # ─── fresh Lean root for the organisation ──────
     - name: Prepare Lean root (fresh lean.json)
       run: |
-        rm -f lean.json
-        # non-interactive init for this org
-        lean init --organization "$QC_ORG_ID" --ci
-        # log in
+        rm -f lean.json                       # wipe any stale config
+        printf '\n' | lean init --organization "$QC_ORG_ID"
         lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
 
+    # ─── algorithm evolution pipeline ──────────────
     - name: Generate child algorithm
       run: python algo_gen.py --num "$NUM_CHILDREN"
 
