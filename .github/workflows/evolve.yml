@@ -1,4 +1,4 @@
-# ───────────── .github/workflows/evolve.yml ─────────────
+# ─────────── .github/workflows/evolve.yml ───────────
 name: evolve
 
 on:
@@ -19,29 +19,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # ───────────────────────────────────────────────
-    - name: Check out source
+    # source --------------------------------------------------------------
+    - name: Check out repo
       uses: actions/checkout@v4
 
+    # python --------------------------------------------------------------
     - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
         python-version: "3.11"
 
-    - name: Install requirements + Lean CLI
+    - name: Install requirements & Lean CLI
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install "lean==1.0.219"
 
-    # ─── fresh Lean root for the organisation ──────
-    - name: Prepare Lean root (fresh lean.json)
+    # lean root -----------------------------------------------------------
+    - name: Fresh Lean root
       run: |
-        rm -f lean.json                       # wipe any stale config
-        printf '\n' | lean init --organization "$QC_ORG_ID"
-        lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
+        rm -f lean.json                   # any legacy file
+        rm -rf data-folder .local || true # any stale dirs
 
-    # ─── algorithm evolution pipeline ──────────────
+        # feed User-ID + API-Token + 3 × blank lines into `lean init`
+        printf '%s\n%s\n\n\n' "$QC_USER_ID" "$QC_API_TOKEN" \
+        | lean init --organization "$QC_ORG_ID"
+
+    # pipeline ------------------------------------------------------------
     - name: Generate child algorithm
       run: python algo_gen.py --num "$NUM_CHILDREN"
 
@@ -52,4 +56,4 @@ jobs:
       env:
         GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GCP_SA_KEY }}
       run: python select_winner.py
-# ────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────
