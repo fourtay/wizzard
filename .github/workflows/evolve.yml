@@ -29,21 +29,23 @@ jobs:
       with:
         python-version: "3.11"
 
-    - name: Install requirements & Lean CLI
+    - name: Install requirements + Lean CLI
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install "lean==1.0.219"
 
+    # credentials ---------------------------------------------------------
+    - name: Lean login (headless)
+      run: lean login --user-id "$QC_USER_ID" --api-token "$QC_API_TOKEN"
+
     # lean root -----------------------------------------------------------
     - name: Fresh Lean root
       run: |
-        rm -f lean.json                   # any legacy file
-        rm -rf data-folder .local || true # any stale dirs
-
-        # feed User-ID + API-Token + 3 × blank lines into `lean init`
-        printf '%s\n%s\n\n\n' "$QC_USER_ID" "$QC_API_TOKEN" \
-        | lean init --organization "$QC_ORG_ID"
+        rm -f lean.json
+        rm -rf data-folder .local || true
+        # answer “y” once to the “directory not empty” prompt
+        printf 'y\n' | lean init --organization "$QC_ORG_ID"
 
     # pipeline ------------------------------------------------------------
     - name: Generate child algorithm
